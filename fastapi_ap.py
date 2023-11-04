@@ -109,7 +109,7 @@ async def send_lnurl_payment(client: httpx.AsyncClient):
         url = 'https://lnb.bolverker.com/api/v1/payments/lnurl'
         
         # Convert to millisats, keep 2%
-        balance = await get_balance(client)  # Make sure this is an async function
+        balance = await get_balance(client)
         withdraw = round(balance * 0.98)
         withdraw = round(withdraw / 1000) * 1000
 
@@ -162,9 +162,9 @@ async def trigger_feeder(client: httpx.AsyncClient):
 
 async def send_payment(amount: float, difference: float, event: str):
     for retry in range(3):
-        payment_status = await send_lnurl_payment()
+        payment_status = await send_lnurl_payment(client)
         if payment_status == 200:
-            run_nostril_command(nos_sec, amount, difference, event)
+            await run_nostril_command(nos_sec, amount, difference, event)
             break
         else:
             logger.error(f"Failed to send payment on attempt {retry + 1}, status code: {payment_status}")
@@ -179,14 +179,14 @@ async def webhook(data: HookData):
     description = data.description
     amount = data.amount / 1000 if data.amount else 0
     balance = float(await get_balance(client)) / 1000
-    trigger = int(await convert_to_sats(client, 5))  # dollar amount - goal to reach for triggering feeder
+    trigger = float(await convert_to_sats(client, 2))  # dollar amount - goal to reach for triggering feeder
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             await send_payment(amount, 0, "feeder_triggered")
     else:
         difference = round(trigger - float(balance))
-        run_nostril_command(nos_sec, amount, difference, "sats_received")
+        await run_nostril_command(nos_sec, amount, difference, "sats_received")
         return "received"
 
 @app.get("/balance")
