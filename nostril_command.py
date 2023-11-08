@@ -34,7 +34,7 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     20: "Thank you for the {new_amount} sats! \n\n{difference_message}\n\n Goat fact: Did you know that goats like {goat_name} are naturally immune to certain diseases? \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     21: "Your generous donation of {new_amount} sats is appreciated! \n\n{difference_message}\n\n Goat fact: Goats like {goat_name} don't have teeth on their upper jaw, just a strong dental pad! \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     22: "{new_amount} sats have been added. \n\n{difference_message}\n\n Did you know? Goats like {goat_name} can rotate their ears to listen in any direction. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
-    23: "Thanks for the {new_amount} sats! \n\n{difference_message}\n\n Watch live and get up to date progress at:  https://lightning-goats.com\n\nWatch live and get up to date progress at:  https://lightning-goats.com",
+    23: "Thanks for the {new_amount} sats! \n\n{difference_message}\n\n \nWatch live and get up to date progress at:  https://lightning-goats.com",
     24: "We received {new_amount} sats from you. \n\n{difference_message}\n\n Goat fact: Goats, like {goat_name}, have four stomach chambers which help them digest tough plants. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     25: "Your donation of {new_amount} sats is heartwarming! \n\n{difference_message}\n\n Did you know? Goats like {goat_name} are known to be great escape artists due to their intelligence and curiosity. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     26: "Thanks for donating {new_amount} sats! \n\n{difference_message}\n\n Interesting fact: While {goat_name} might enjoy it, goats are known to consume paper but they don't actually eat it as a part of their diet! \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
@@ -111,11 +111,6 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     20: "The moment is near: {difference} sats till feeding."
 }
 
-    relays = {
-    'lnb.bolverker.com': 'wss://lnb.bolverker.com/nostrclient/api/v1/relay',
-}
-
-
     if event_type == "sats_received":
         message_dict = sats_received_dict
     elif event_type == "feeder_triggered":
@@ -130,23 +125,20 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     # Format the message with the available variables
     message = message.format(new_amount=new_amount, goat_name=goat_name, difference_message=difference_message)
 
-    # Loop through each relay and execute the Nostril command asynchronously
-    for relay_name, relay_url in relays.items():
-        logger.info(f"Sending message through relay: {relay_name}")
+    
+    command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat wss://lnb.bolverker.com/nostrclient/api/v1/relay"
 
-        command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat {relay_url}"
+    # Start the subprocess
+    process = await asyncio.create_subprocess_shell(
+        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
 
-        # Start the subprocess
-        process = await asyncio.create_subprocess_shell(
-            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+    # Wait for the command to complete
+    stdout, stderr = await process.communicate()
 
-        # Wait for the command to complete
-        stdout, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            logger.error(f"Command failed with error: {stderr.decode()}")
-        else:
-            logger.info(f"Command output: {stdout.decode()}")
+    if process.returncode != 0:
+        logger.error(f"Command failed with error: {stderr.decode()}")
+    else:
+        logger.info(f"Command output: {stdout.decode()}")
 
     return process.returncode
