@@ -8,6 +8,10 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 import os
 from nostril_command import run_nostril_command
+import asyncio
+
+# Set to keep track of processed payment hashes
+processed_payment_hashes = set()
 
 # Load the environment variables
 load_dotenv()
@@ -137,7 +141,14 @@ async def send_lnurl_payment(client: httpx.AsyncClient):
         logger.error(f'Failed to send payment: {e}')
         return None
 
+async def remove_payment_hash_after_delay(payment_hash: str, delay: int):
+    await asyncio.sleep(delay)
+    processed_payment_hashes.discard(payment_hash)  # Use discard to avoid KeyError if hash is not present
+    logger.debug(f"Expired payment hash: {payment_hash}")
+
+
 class HookData(BaseModel):
+    payment_hash: str
     description: Optional[str] = None
     amount: Optional[float] = 0
 
@@ -172,6 +183,18 @@ async def send_payment(amount: float, difference: float, event: str):
 # FastAPI route definitions
 @app.post('/lnurlp/hooker')
 async def webhook(data: HookData):
+    # Debug output for payment data
+    logger.debug(f"Received payment data: {data}")
+    
+    # Skip if payment has already been processed
+    if data.payment_hash in processed_payment_hashes:
+        logger.info(f'Payment with hash {data.payment_hash} already processed, skipping...')
+        return 'payment_already_processed'
+
+    # Add the payment hash to the set and schedule its removal
+    processed_payment_hashes.add(data.payment_hash)
+    asyncio.create_task(remove_payment_hash_after_delay(data.payment_hash, 5))
+        
     if await is_feeder_on(client):
         logger.info('Feeder off, skipping...')
         return 'feeder_off'
@@ -179,7 +202,7 @@ async def webhook(data: HookData):
     description = data.description
     amount = data.amount / 1000 if data.amount else 0
     balance = float(await get_balance(client)) / 1000
-    trigger = float(await convert_to_sats(client, 2))  # dollar amount - goal to reach for triggering feeder
+    trigger = float(await convert_to_sats(client, 0.50))  # dollar amount - goal to reach for triggering feeder
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
@@ -188,6 +211,9 @@ async def webhook(data: HookData):
         difference = round(trigger - float(balance))
         await run_nostril_command(nos_sec, amount, difference, "sats_received")
         return "received"
+    
+    
+    return 'payment_processed'
 
 @app.get("/balance")
 async def balance():
