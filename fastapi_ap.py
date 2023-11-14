@@ -202,15 +202,16 @@ async def webhook(data: HookData):
     description = data.description
     amount = data.amount / 1000 if data.amount else 0
     balance = float(await get_balance(client)) / 1000
-    trigger = float(await convert_to_sats(client, 0.50))  # dollar amount - goal to reach for triggering feeder
+    trigger = float(await convert_to_sats(client, 1))  # dollar amount - goal to reach for triggering feeder
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             await send_payment(amount, 0, "feeder_triggered")
     else:
         difference = round(trigger - float(balance))
-        await run_nostril_command(nos_sec, amount, difference, "sats_received")
-        return "received"
+        if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
+            await run_nostril_command(nos_sec, amount, difference, "sats_received")
+            return "received"
     
     
     return 'payment_processed'
