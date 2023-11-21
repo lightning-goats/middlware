@@ -134,7 +134,7 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     message = message.format(new_amount=new_amount, goat_name=random_goat_names, difference_message=difference_message)
 
     
-    command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat wss://lnb.bolverker.com/nostrclient/api/v1/relay"
+    command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat wss://nostr.mutinywallet.com"
 
     # Start the subprocess
     process = await asyncio.create_subprocess_shell(
