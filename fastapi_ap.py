@@ -67,19 +67,22 @@ client = httpx.AsyncClient()
 
 #  helper functions
 async def get_live_video_id(api_key, channel_id):
-    youtube = build('youtube', 'v3', developerKey=api_key)
-    request = youtube.search().list(
-        part="id",
-        channelId=channel_id,
-        eventType="live",
-        type="video"
-    )
-    response = request.execute()
+    def synchronous_get_video_id():
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.search().list(
+            part="id",
+            channelId=channel_id,
+            eventType="live",
+            type="video"
+        )
+        response = request.execute()
 
-    if len(response['items']) > 0:
-        return response['items'][0]['id']['videoId']
-    else:
-        return None
+        if len(response['items']) > 0:
+            return response['items'][0]['id']['videoId']
+        else:
+            return None
+
+    return await asyncio.to_thread(synchronous_get_video_id)
 
 async def get_balance(client: httpx.AsyncClient):
     try:
