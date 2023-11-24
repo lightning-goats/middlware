@@ -12,7 +12,7 @@ from cachetools import TTLCache
 app = FastAPI()
 
 # Cache for reposts (public key and ID) with automatic expiration
-repost_cache = TTLCache(maxsize=1000, ttl=43200)  # Example: 1000 items, 12 hours TTL
+repost_cache = TTLCache(maxsize=10, ttl=86400)  # 10 items, 24 hours TTL
 
 # Retrieve public key
 identity = get_public_key('npub1v60thnx0gz0wq3n6xdnq46y069l9x70xgmjp6lprdl6fv0eux6mqgjj4rp')
@@ -118,7 +118,6 @@ def task_callback(task):
 @app.on_event("startup")
 async def startup_event():
     await relay_manager.prepare_relays()
-    clear_old_cache_entries()
     asyncio.create_task(repost_check_loop())  # Start the repost check loop
 
 @app.on_event("shutdown")
