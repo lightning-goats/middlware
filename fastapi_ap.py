@@ -13,6 +13,12 @@ import json
 import os
 import logging
 
+def validate_env_vars(required_vars):
+    missing_vars = [var for var in required_vars if os.getenv(var) is None]
+    if missing_vars:
+        missing_vars_str = ', '.join(missing_vars)
+        raise ValueError(f"The following environment variables are missing: {missing_vars_str}")
+
 # Load the environment variables
 load_dotenv()
 
@@ -64,12 +70,6 @@ else:
 # Create a FastAPI app
 app = FastAPI()
 client = httpx.AsyncClient()
-
-def validate_env_vars(required_vars):
-    missing_vars = [var for var in required_vars if os.getenv(var) is None]
-    if missing_vars:
-        missing_vars_str = ', '.join(missing_vars)
-        raise ValueError(f"The following environment variables are missing: {missing_vars_str}")
         
 def set_trigger_amount(amount):
     with shelve.open('mydata.db') as shelf:
