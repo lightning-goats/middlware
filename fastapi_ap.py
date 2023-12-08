@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import os
 from nostril_command import run_nostril_command
 import asyncio
+import shelve
 
 # Set to keep track of processed payment hashes
 processed_payment_hashes = set()
@@ -66,7 +67,21 @@ else:
 app = FastAPI()
 client = httpx.AsyncClient()
 
-#  helper functions
+#  helper functions    
+def set_trigger_amount(amount):
+    with shelve.open('mydata.db') as shelf:
+        shelf['trigger_amount'] = amount
+
+def get_trigger_amount():
+    with shelve.open('mydata.db') as shelf:
+        return shelf.get('trigger_amount')
+        
+async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.0):
+    sats = await convert_to_sats(client, amount_in_usd)
+    if sats is not None:
+        set_trigger_amount(sats)
+    return get_trigger_amount()
+
 async def get_live_video_id(api_key, channel_id):
     def synchronous_get_video_id():
         youtube = build('youtube', 'v3', developerKey=api_key)
@@ -89,12 +104,17 @@ async def get_balance(client: httpx.AsyncClient):
     try:
         response = await client.get(api_url, headers={'X-Api-Key': api_key})
         if response.status_code == 200:
-            return response.json().get('balance')
+            balance = response.json().get('balance')
+            with shelve.open('mydata.db') as shelf:
+                shelf['balance'] = balance
+            return balance
         else:
             logger.error(f'Failed to retrieve balance, status code: {response.status_code}')
     except httpx.RequestError as e:
         logger.error(f'Failed to retrieve balance: {e}')
-    return None
+
+    with shelve.open('mydata.db') as shelf:
+        return shelf.get('balance')
 
 async def convert_to_sats(client: httpx.AsyncClient, amount: float):
     try:
@@ -108,9 +128,11 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float):
             return response.json()['sats']
         else:
             logger.error(f'Failed to convert amount, status code: {response.status_code}')
+            return None
     except httpx.RequestError as e:
         logger.error(f'Failed to convert amount: {e}')
-    return None
+        return None
+
     
 async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
     try:
@@ -245,7 +267,7 @@ async def webhook(data: HookData):
     description = data.description
     amount = int(data.amount / 1000) if data.amount else 0
     balance = float(await get_balance(client)) / 1000
-    trigger = float(await convert_to_sats(client, 1))  # dollar amount - goal to reach for triggering feeder
+    trigger =await update_and_get_trigger_amount(client)
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
@@ -267,6 +289,14 @@ async def balance():
     else:
         logger.error("Failed to retrieve balance")
         raise HTTPException(status_code=400, detail="Failed to retrieve balance")
+        
+@app.get("/trigger_amount")
+async def get_trigger_amount_route():
+    trigger_amount = await update_and_get_trigger_amount(client)
+    if trigger_amount is not None:
+        return {"trigger_amount": trigger_amount}
+    else:
+        raise HTTPException(status_code=404, detail="Trigger amount not found")
         
 @app.get("/convert/{amount}")
 async def convert(amount: float):
