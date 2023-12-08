@@ -1,15 +1,24 @@
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-import httpx
 from googleapiclient.discovery import build
-import logging
 from urllib.parse import quote
 from dotenv import load_dotenv
-import os
 from nostril_command import run_nostril_command
 import asyncio
 import shelve
+import httpx
+import json
+import os
+import logging
+
+# Load the environment variables
+load_dotenv()
+
+# List all the environment variables that your application depends on
+required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'API_URL', 'GOOGLE_API_KEY', 'NOS_SEC']
+validate_env_vars(required_env_vars)
 
 # Set to keep track of processed payment hashes
 processed_payment_hashes = set()
@@ -24,17 +33,6 @@ sat_key = os.getenv('SAT_KEY')
 api_url= os.getenv('API_URL')
 google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
-
-# List all the environment variables that your application depends on
-required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'API_URL', 'GOOGLE_API_KEY', 'NOS_SEC']
-
-# Check which environment variables are set
-missing_vars = [var for var in required_env_vars if os.getenv(var) is None]
-
-# If there are any missing variables, raise an error and log or print their names
-if missing_vars:
-    missing_vars_str = ', '.join(missing_vars)
-    raise ValueError(f"The following environment variables are missing: {missing_vars_str}")
 
 # Define headers for the HTTP request
 headers = {
@@ -67,7 +65,12 @@ else:
 app = FastAPI()
 client = httpx.AsyncClient()
 
-#  helper functions    
+def validate_env_vars(required_vars):
+    missing_vars = [var for var in required_vars if os.getenv(var) is None]
+    if missing_vars:
+        missing_vars_str = ', '.join(missing_vars)
+        raise ValueError(f"The following environment variables are missing: {missing_vars_str}")
+        
 def set_trigger_amount(amount):
     with shelve.open('mydata.db') as shelf:
         shelf['trigger_amount'] = amount
@@ -83,22 +86,35 @@ async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd
     return get_trigger_amount()
 
 async def get_live_video_id(api_key, channel_id):
-    def synchronous_get_video_id():
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.search().list(
-            part="id",
-            channelId=channel_id,
-            eventType="live",
-            type="video"
-        )
-        response = request.execute()
+    today = datetime.now().date()
+    with shelve.open('live_video_data.db') as shelf:
+        if 'video_id' in shelf and 'date' in shelf and shelf['date'] == today:
+            # Return the stored video ID if it's from today
+            return shelf['video_id']
 
-        if len(response['items']) > 0:
-            return response['items'][0]['id']['videoId']
-        else:
-            return None
+    # If no valid stored ID, fetch a new one
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "part": "id",
+        "channelId": channel_id,
+        "eventType": "live",
+        "type": "video",
+        "key": api_key
+    }
 
-    return await asyncio.to_thread(synchronous_get_video_id)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        if 'items' in data and len(data['items']) > 0:
+            video_id = data['items'][0]['id']['videoId']
+            # Store the new video ID with the current date
+            with shelve.open('live_video_data.db') as shelf:
+                shelf['video_id'] = video_id
+                shelf['date'] = today
+            return video_id
+    return None
 
 async def get_balance(client: httpx.AsyncClient):
     try:
