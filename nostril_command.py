@@ -73,7 +73,7 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
 
 
     feeder_trigger_dict = {
-    0: "Feeder Trigger Alert! {new_amount} sats added. Random plebs have banded together to feed the herd. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
+    0: "Feeder Trigger Alert! {new_amount} sats added. Random plebs have banded together to feed the goats. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     1: "The herd has been fed thanks to generous contributors! {new_amount} sats contributed. {goat_name} like the snack! \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     2: "The goats got treats right now! {new_amount} sats received. Join the fun, watch live, and get up to date progress at:  https://lightning-goats.com.\n\n {goat_name} is getting his fill!",
     3: "Snack time! {new_amount} sats just added. The herd, including {goat_name}, munch away thanks to our contributors. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
@@ -89,7 +89,7 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     13: "What's that sound? It's the dinner bell for the goats! {new_amount} sats received. Thanks for contributing! \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     14: "Happy goats coming right up! {new_amount} sats contributed. Thanks to the contributions, the herd including {goat_name} is about to enjoy a hearty meal. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     15: "It's a happy day for the herd! {new_amount} sats just added. The whole tribe including {goat_name} is tucking into a meal, thanks to your generosity. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
-    16: "Feeding time is here! {new_amount} sats received. the herd, ang with {goat_name}, is enjoying the goat treats you've sent. Watch live and get up to date progress at:  https://lightning-goats.com",
+    16: "Feeding time is here! {new_amount} sats received. The herd, along with {goat_name}, is enjoying the goat treats you've sent. Watch live and get up to date progress at:  https://lightning-goats.com",
     17: "Dinner is served for the goats! {new_amount} sats in. Thanks to you, everyone, including {goat_name}, is full and content. \n\nWatch live and get up to date progress at:  https://lightning-goats.com",
     18: "The dinner bell has rung for the goats! {new_amount} sats added. \n\nWatch {goat_name} live and get up to date progress at:  https://lightning-goats.com",
     19: "Thanks to your help, it's feeding time at the farm! {new_amount} sats contributed. {goat_name} couldn't be happier. Watch live and get up to date progress at:  https://lightning-goats.com",
@@ -134,7 +134,8 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     message = message.format(new_amount=new_amount, goat_name=random_goat_names, difference_message=difference_message)
 
     
-    command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat wss://nostr.mutinywallet.com"
+    command = f"/usr/local/bin/nostril --envelope --sec {nos_sec} --content \"{message}\" | websocat wss://lnb.bolverker.com/nostrclient/api/v1/relay"
+    
 
     # Start the subprocess
     process = await asyncio.create_subprocess_shell(
@@ -149,4 +150,4 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
     else:
         logger.info(f"Command output: {stdout.decode()}")
 
-    return process.returncode
+    return message
