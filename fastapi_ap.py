@@ -26,12 +26,6 @@ load_dotenv()
 required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'API_URL', 'GOOGLE_API_KEY', 'NOS_SEC']
 validate_env_vars(required_env_vars)
 
-# Set to keep track of processed payment hashes
-processed_payment_hashes = set()
-
-# Load the environment variables
-load_dotenv()
-
 ohauth1 = os.getenv('OH_AUTH_1')
 api_key = os.getenv('API_KEY')
 herd_key = os.getenv('HERD_KEY')
@@ -39,6 +33,9 @@ sat_key = os.getenv('SAT_KEY')
 api_url= os.getenv('API_URL')
 google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
+
+# Set to keep track of processed payment hashes
+processed_payment_hashes = set()
 
 # Define headers for the HTTP request
 headers = {
@@ -141,14 +138,17 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float):
         }
         response = await client.post('https://lnb.bolverker.com/api/v1/conversion', headers=headers, json=payload)
         if response.status_code == 200:
-            return response.json()['sats']
+            sats = response.json()['sats']
+            with shelve.open('mydata.db') as shelf:
+                shelf['sats'] = sats
+            return sats
         else:
             logger.error(f'Failed to convert amount, status code: {response.status_code}')
-            return None
     except httpx.RequestError as e:
         logger.error(f'Failed to convert amount: {e}')
-        return None
 
+    with shelve.open('mydata.db') as shelf:
+        return shelf.get('sats')
     
 async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
     try:
@@ -220,6 +220,19 @@ async def remove_payment_hash_after_delay(payment_hash: str, delay: int):
     processed_payment_hashes.discard(payment_hash)  # Use discard to avoid KeyError if hash is not present
     logger.debug(f"Expired payment hash: {payment_hash}")
 
+def retrieve_messages(db_path):
+    with shelve.open(db_path) as db:
+        messages = dict(db)
+        return messages
+        
+def update_message_in_db(db_path, new_message):
+    formatted_message = new_message.replace('\n', ' ')
+    formatted_message = formatted_message.replace('Watch live and get up to date progress at: https://lightning-goats.com', '')
+    with shelve.open(db_path, writeback=True) as db:
+        db.clear()
+        db['latest_message'] = formatted_message
+        print(f"Updated message in database: {formatted_message}")
+
 
 class HookData(BaseModel):
     payment_hash: str
@@ -256,7 +269,8 @@ async def send_payment(amount: float, difference: float, event: str):
         payment_status = await pay_invoice(client, payment_request)
 
         if payment_status == 201:
-            await run_nostril_command(nos_sec, amount, difference, event)
+            message = await run_nostril_command(nos_sec, amount, difference, event)
+            update_message_in_db('messages.db', message)
             break
         else:
             logger.error(f"Failed to send payment on attempt {retry + 1}, status code: {payment_status}")
@@ -291,10 +305,9 @@ async def webhook(data: HookData):
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            await run_nostril_command(nos_sec, amount, difference, "sats_received")
+            message = await run_nostril_command(nos_sec, amount, difference, "sats_received")
+            update_message_in_db('messages.db', message)
             return "received"
-    
-    
     return 'payment_processed'
 
 @app.get("/balance")
@@ -320,6 +333,14 @@ async def convert(amount: float):
     if sats is not None:
         return sats
 
+@app.get("/feeder_status")
+async def feeder_status():
+    status = await is_feeder_on(client)
+    if status is not None:
+        return status
+    else:
+        logger.error("Failed to retrieve feeder status")
+        raise HTTPException(status_code=400, detail="Failed to retrieve feeder status")
 
 @app.get("/islive/{channel_id}")
 async def live_status(channel_id: str):
@@ -329,6 +350,14 @@ async def live_status(channel_id: str):
         return {'status': 'live', 'video_id': video_id}
     else:
         return {'status': 'offline'}
+
+@app.get("/messages")
+async def get_messages():
+    try:
+        messages = retrieve_messages('messages.db')
+        return messages
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.on_event("shutdown")
 async def shutdown_event():
