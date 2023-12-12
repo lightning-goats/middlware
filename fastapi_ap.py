@@ -34,6 +34,8 @@ api_url= os.getenv('API_URL')
 google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
 
+cyber_herd_list = []
+
 # Set to keep track of processed payment hashes
 processed_payment_hashes = set()
 
@@ -78,9 +80,9 @@ def get_trigger_amount():
         
 async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.0):
     sats = await convert_to_sats(client, amount_in_usd)
-    if sats is not None:
+    if sats is not None and sats != 0:
         set_trigger_amount(sats)
-    return get_trigger_amount()
+    return sats
 
 async def get_live_video_id(api_key, channel_id):
     today = datetime.now().date()
@@ -118,9 +120,12 @@ async def get_balance(client: httpx.AsyncClient):
         response = await client.get(api_url, headers={'X-Api-Key': api_key})
         if response.status_code == 200:
             balance = response.json().get('balance')
-            with shelve.open('mydata.db') as shelf:
-                shelf['balance'] = balance
-            return balance
+            if balance != 0:
+                with shelve.open('mydata.db') as shelf:
+                    shelf['balance'] = balance
+                return balance
+            else:
+                return shelf.get('balance')
         else:
             logger.error(f'Failed to retrieve balance, status code: {response.status_code}')
     except httpx.RequestError as e:
@@ -139,9 +144,10 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float):
         response = await client.post('https://lnb.bolverker.com/api/v1/conversion', headers=headers, json=payload)
         if response.status_code == 200:
             sats = response.json()['sats']
-            with shelve.open('mydata.db') as shelf:
-                shelf['sats'] = sats
-            return sats
+            if sats != 0:
+                with shelve.open('mydata.db') as shelf:
+                    shelf['sats'] = sats
+                return sats
         else:
             logger.error(f'Failed to convert amount, status code: {response.status_code}')
     except httpx.RequestError as e:
@@ -239,6 +245,10 @@ class HookData(BaseModel):
     description: Optional[str] = None
     amount: Optional[float] = 0
 
+class CyberHerdData(BaseModel):
+    name: str
+    lud16: str
+
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
     try:
         response = await client.get('http://10.8.0.6:8080/rest/items/FeederOverride/state', headers=headers, auth=(ohauth1, ''))
@@ -248,7 +258,7 @@ async def is_feeder_on(client: httpx.AsyncClient) -> bool:
         return False
 
 async def should_trigger_feeder(balance: float, trigger: int) -> bool:
-    return balance >= (trigger - 50)
+    return balance >= (trigger - 25)
 
 async def trigger_feeder(client: httpx.AsyncClient):
     try:
@@ -318,6 +328,16 @@ async def balance():
     else:
         logger.error("Failed to retrieve balance")
         raise HTTPException(status_code=400, detail="Failed to retrieve balance")
+
+@app.post("/cyber_herd")
+async def update_cyber_herd(data: List[CyberHerdData]):
+    global cyber_herd_list
+
+    for item in data:
+        item_dict = item.dict()
+        if item_dict not in cyber_herd_list:
+            cyber_herd_list.append(item_dict)
+    return {"message": "Cyber herd data updated successfully"}
         
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
