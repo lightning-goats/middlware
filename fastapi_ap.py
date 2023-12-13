@@ -1,6 +1,7 @@
+from typing import List
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, constr
 from typing import Optional
 from googleapiclient.discovery import build
 from urllib.parse import quote
@@ -246,8 +247,8 @@ class HookData(BaseModel):
     amount: Optional[float] = 0
 
 class CyberHerdData(BaseModel):
-    name: str
-    lud16: str
+    name: constr(strip_whitespace=True)
+    lud16: constr(strip_whitespace=True)
 
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
     try:
@@ -337,8 +338,12 @@ async def update_cyber_herd(data: List[CyberHerdData]):
         item_dict = item.dict()
         if item_dict not in cyber_herd_list:
             cyber_herd_list.append(item_dict)
-    return {"message": "Cyber herd data updated successfully"}
-        
+    return 0
+
+@app.get("/view_cyber_herd")
+async def view_cyber_herd():
+    return cyber_herd_list
+
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
     trigger_amount = await update_and_get_trigger_amount(client)
@@ -382,5 +387,4 @@ async def get_messages():
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
-
 
