@@ -6,7 +6,7 @@ Description=Timer to restart FastAPI App at midnight
 OnCalendar=*-*-* 00:00:00
 
 # Specify the service file that this timer controls
-Unit=fastapi-app.service
+Unit=fastapi_app.service
 
 [Install]
 WantedBy=timers.target
