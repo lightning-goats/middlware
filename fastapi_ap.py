@@ -1,7 +1,7 @@
 from typing import List
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, constr
+from pydantic import BaseModel
 from typing import Optional
 from googleapiclient.discovery import build
 from urllib.parse import quote
@@ -234,11 +234,11 @@ def retrieve_messages(db_path):
         
 def update_message_in_db(db_path, new_message):
     formatted_message = new_message.replace('\n', ' ')
-    formatted_message = formatted_message.replace('Watch live and get up to date progress at: https://lightning-goats.com', '')
+    formatted_message = formatted_message.replace('https://lightning-goats.com', '')
     with shelve.open(db_path, writeback=True) as db:
         db.clear()
         db['latest_message'] = formatted_message
-        print(f"Updated message in database: {formatted_message}")
+        logger.info("Updated message in database.")
 
 
 class HookData(BaseModel):
@@ -247,8 +247,13 @@ class HookData(BaseModel):
     amount: Optional[float] = 0
 
 class CyberHerdData(BaseModel):
-    name: constr(strip_whitespace=True)
-    lud16: constr(strip_whitespace=True)
+    event_id: str
+    author_pubkey: str
+    pubkey: str
+    nprofile: str
+    lud16: str
+    notified: bool = False
+    payouts: int = 0
 
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
     try:
@@ -280,7 +285,7 @@ async def send_payment(amount: float, difference: float, event: str):
         payment_status = await pay_invoice(client, payment_request)
 
         if payment_status == 201:
-            message = await run_nostril_command(nos_sec, amount, difference, event)
+            message = await run_nostr_command(nos_sec, amount, difference, event)
             update_message_in_db('messages.db', message)
             break
         else:
@@ -312,11 +317,16 @@ async def webhook(data: HookData):
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
+            # cyber_herd payouts functionality
+            cyber_herd = await get_cyber_herd()
+            #TODO: implement reply to thread if notified is FALSE
+            #TODO: implement cyberherd payouts - will need functions for sending to lud16 addresses and looping through records
+            
             await send_payment(amount, 0, "feeder_triggered")
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            message = await run_nostril_command(nos_sec, amount, difference, "sats_received")
+            message = await run_nostr_command(nos_sec, amount, difference, "sats_received")
             update_message_in_db('messages.db', message)
             return "received"
     return 'payment_processed'
@@ -340,8 +350,13 @@ async def update_cyber_herd(data: List[CyberHerdData]):
             cyber_herd_list.append(item_dict)
     return 0
 
-@app.get("/view_cyber_herd")
-async def view_cyber_herd():
+@app.get("/reset_cyber_herd")
+async def reset_cyber_herd():
+    cyber_herd_list.clear()
+    logger.info("Cyberherd list reset")
+    
+@app.get("/get_cyber_herd")
+async def get_cyber_herd():
     return cyber_herd_list
 
 @app.get("/trigger_amount")
@@ -387,4 +402,5 @@ async def get_messages():
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
+
 
