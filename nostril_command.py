@@ -151,3 +151,4 @@ async def run_nostril_command(nos_sec: str, new_amount: float, difference: float
         logger.info(f"Command output: {stdout.decode()}")
 
     return message
+
