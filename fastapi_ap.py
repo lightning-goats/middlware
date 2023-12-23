@@ -348,6 +348,7 @@ async def update_cyber_herd(data: List[CyberHerdData]):
         item_dict = item.dict()
         if item_dict not in cyber_herd_list:
             cyber_herd_list.append(item_dict)
+            # TODO: nostr notification: reply to post welcoming user to the cyberherd
     return 0
 
 @app.get("/reset_cyber_herd")
