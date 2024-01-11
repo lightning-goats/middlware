@@ -1,12 +1,13 @@
 from typing import List
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 from googleapiclient.discovery import build
 from urllib.parse import quote
 from dotenv import load_dotenv
-from nostril_command import run_nostril_command
+from messaging import make_messages
 import asyncio
 import shelve
 import httpx
@@ -36,6 +37,7 @@ google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
 
 cyber_herd_list = []
+message_list = []
 
 # Set to keep track of processed payment hashes
 processed_payment_hashes = set()
@@ -70,6 +72,15 @@ else:
 # Create a FastAPI app
 app = FastAPI()
 client = httpx.AsyncClient()
+
+def convert_to_dict(message_data):
+    # If the message_data is just a string, we'll assume it's the content of the message
+    if isinstance(message_data, str):
+        return {"content": message_data}
+    
+    # If it's already a dictionary, return as is
+    elif isinstance(message_data, dict):
+        return message_data
         
 def set_trigger_amount(amount):
     with shelve.open('mydata.db') as shelf:
@@ -227,19 +238,28 @@ async def remove_payment_hash_after_delay(payment_hash: str, delay: int):
     processed_payment_hashes.discard(payment_hash)  # Use discard to avoid KeyError if hash is not present
     logger.debug(f"Expired payment hash: {payment_hash}")
 
-def retrieve_messages(db_path):
-    with shelve.open(db_path) as db:
-        messages = dict(db)
-        return messages
+def retrieve_messages():
+    try:
+        json_data = json.dumps(message_list)
+        #message_list.clear()  # Reset the list
+        return json_data
+    except Exception as e:
+        logger.error(f"Error retrieving messages: {e}")
+        return json.dumps({"error": str(e)})
         
-def update_message_in_db(db_path, new_message):
-    formatted_message = new_message.replace('\n', ' ')
-    formatted_message = formatted_message.replace('https://lightning-goats.com', '')
-    with shelve.open(db_path, writeback=True) as db:
-        db.clear()
-        db['latest_message'] = formatted_message
-        logger.info("Updated message in database.")
+def update_message_in_db(new_message=None):
+    global message_list
+    
+    formatted_message = ''
+    if new_message:
+        formatted_message = new_message.replace('\n', ' ')
 
+    if new_message:
+        message_list.append(formatted_message)
+
+        # If the number of messages exceeds 3, remove the oldest one
+        while len(message_list) > 3:
+            message_list.pop(0)  # Remove the first (oldest) message
 
 class HookData(BaseModel):
     payment_hash: str
@@ -254,6 +274,28 @@ class CyberHerdData(BaseModel):
     lud16: str
     notified: bool = False
     payouts: int = 0
+    
+def get_cyber_herd_list():
+    with shelve.open('cyber_herd_data.db') as shelf:
+        return shelf.get('cyber_herd_list', [])
+
+def update_cyber_herd_list(new_data: List[dict], reset=False):  
+    with shelve.open('cyber_herd_data.db', writeback=True) as shelf:
+        if reset:
+            # This removes the key entirely from the database
+            del shelf['cyber_herd_list']
+        else:
+            cyber_herd_dict = {item['pubkey']: item for item in shelf.get('cyber_herd_list', [])}
+
+            for new_item_dict in new_data:  # new_item_dict is already a dictionary
+                pubkey = new_item_dict['pubkey']
+                cyber_herd_dict[pubkey] = new_item_dict  # Update or add the new item
+
+            updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+            shelf['cyber_herd_list'] = updated_cyber_herd_list
+
+class Message(BaseModel):
+    content: str
 
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
     try:
@@ -285,8 +327,8 @@ async def send_payment(amount: float, difference: float, event: str):
         payment_status = await pay_invoice(client, payment_request)
 
         if payment_status == 201:
-            message = await run_nostr_command(nos_sec, amount, difference, event)
-            update_message_in_db('messages.db', message)
+            message = await make_messages(nos_sec, amount, difference, event)
+            update_message_in_db(message)
             break
         else:
             logger.error(f"Failed to send payment on attempt {retry + 1}, status code: {payment_status}")
@@ -317,17 +359,15 @@ async def webhook(data: HookData):
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
-            # cyber_herd payouts functionality
-            cyber_herd = await get_cyber_herd()
-            #TODO: implement reply to thread if notified is FALSE
-            #TODO: implement cyberherd payouts - will need functions for sending to lud16 addresses and looping through records
+            #TODO: implement cyberherd payouts - will need functions for sending to lud16 addresses for item in cyber_herd_list:
+                #TODO: payout retrieval, summing and updating cyber_herd_list payouts feild. 
             
-            await send_payment(amount, 0, "feeder_triggered")
+            await send_payment(amount, 0, "feeder_triggered") #reset herd wallet
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            message = await run_nostr_command(nos_sec, amount, difference, "sats_received")
-            update_message_in_db('messages.db', message)
+            message = await make_messages(nos_sec, amount, difference, "sats_received")
+            update_message_in_db(message)
             return "received"
     return 'payment_processed'
 
@@ -342,23 +382,48 @@ async def balance():
 
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData]):
-    global cyber_herd_list
+    # Retrieve the current cyber herd list from the shelve database
+    cyber_herd_list = get_cyber_herd_list()
 
+    balance = float(await get_balance(client)) / 1000
+    trigger = await update_and_get_trigger_amount(client)
+    difference = round(trigger - float(balance))
+
+    # Create a dictionary for quick lookup using pubkey
+    cyber_herd_dict = {item['pubkey']: item for item in cyber_herd_list}
+
+    # Append new items to the list
     for item in data:
         item_dict = item.dict()
-        if item_dict not in cyber_herd_list:
-            cyber_herd_list.append(item_dict)
-            # TODO: nostr notification: reply to post welcoming user to the cyberherd
-    return 0
+        pubkey = item_dict['pubkey']
+        
+        # Check if the item is new or if its notified status is False
+        if pubkey not in cyber_herd_dict or not cyber_herd_dict[pubkey].get('notified', False):
+            item_dict['notified'] = False  # Set notified to False for new items
+            cyber_herd_dict[pubkey] = item_dict  # Update or add the item in the dictionary
+
+            # Send message and update notified status
+            if not item_dict['notified']:
+                message = await make_messages(nos_sec, 0, difference, "cyber_herd", item_dict)
+                update_message_in_db(message)
+                item_dict['notified'] = True  # Update notified status
+
+    # Update the list from the dictionary and trim to the last 10 records
+    updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+
+    # Update the cyber herd list in the database
+    update_cyber_herd_list(updated_cyber_herd_list)
+
+    return {"status": "success"}
+
+
+@app.get("/get_cyber_herd")
+async def get_cyber_herd():
+    return get_cyber_herd_list()
 
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
-    cyber_herd_list.clear()
-    logger.info("Cyberherd list reset")
-    
-@app.get("/get_cyber_herd")
-async def get_cyber_herd():
-    return cyber_herd_list
+    update_cyber_herd_list([], reset=True)
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
@@ -392,13 +457,41 @@ async def live_status(channel_id: str):
     else:
         return {'status': 'offline'}
 
-@app.get("/messages")
+
+@app.get("/messages", response_model=List[Message])
 async def get_messages():
+    global message_list
+    
     try:
-        messages = retrieve_messages('messages.db')
-        return messages
+        json_messages = retrieve_messages()
+        messages = json.loads(json_messages)
+        formatted_messages = [Message(content=msg) for msg in messages if isinstance(msg, str)]
+        return formatted_messages
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in /messages route: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/messages/info")
+async def create_info_message():
+    global message_list
+    
+    try:
+        # Create a new informational message
+        message_data = await make_messages(nos_sec, 0, 0, "interface_info")
+        update_message_in_db(message_data)
+        json_messages = retrieve_messages()
+        messages = json.loads(json_messages)
+
+        formatted_messages = [Message(content=msg) for msg in messages if isinstance(msg, str)]
+        return formatted_messages
+    except Exception as e:
+        logger.error(f"Error in /messages/info route: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/messages/reset")
+async def reset_all_mesages():
+    global message_list
+    message_list=[]
 
 @app.on_event("shutdown")
 async def shutdown_event():

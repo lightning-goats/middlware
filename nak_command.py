@@ -2,21 +2,27 @@ import asyncio
 import random
 import subprocess
 import logging
-from messages import sats_received_dict, feeder_trigger_dict, variations, cyber_herd_dict
+from messages import sats_received_dict, feeder_trigger_dict, variations, cyber_herd_dict, cyber_herd_info_dict, interface_info_dict
 
 # Initialize a logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_random_goat_names(goat_names):
-    selected_names = random.sample(goat_names, random.randint(1, len(goat_names)))
-    if len(selected_names) > 1:
-        return ', '.join(selected_names[:-1]) + ' and ' + selected_names[-1]
-    else:
-        return selected_names[0]
+def get_random_goat_names(goat_names_dict):
+    keys = list(goat_names_dict.keys())
+    selected_keys = random.sample(keys, random.randint(1, len(keys)))
+    return [(key, goat_names_dict[key]) for key in selected_keys]
 
-async def run_nostr_command(nos_sec: str, new_amount: float, difference: float, event_type: str, nostr: dict = None):
-    goat_names = ["#Dexter", "#Rowan", "#Gizmo", "#Nova", "#Cosmo", "#Newton"]
+def join_with_and(items):
+    if len(items) > 1:
+        return ', '.join(items[:-1]) + ', and ' + items[-1]
+    elif items:
+        return items[0]
+    else:
+        return ''
+
+async def make_messages(nos_sec: str, new_amount: float, difference: float, event_type: str, nostr: dict = None):
+    goat_names = ["Dexter", "Rowan", "Nova", "Cosmo", "Newton"]
     command = None
     
     if event_type == "sats_received":
@@ -25,6 +31,10 @@ async def run_nostr_command(nos_sec: str, new_amount: float, difference: float, 
         message_dict = feeder_trigger_dict
     elif event_type == "cyber_herd":
         message_dict = cyber_herd_dict
+    elif event_type == "cyber_herd_info":
+        message_dict = cyber_herd_info_dict
+    elif event_type == "interface_info":
+        message_dict = interface_info_dict
 
     message = message_dict[random.randint(0, len(message_dict) - 1)]
     random_goat_names = get_random_goat_names(goat_names)
@@ -33,7 +43,7 @@ async def run_nostr_command(nos_sec: str, new_amount: float, difference: float, 
 
     if event_type == "cyber_herd":
         cyber_herd_message = message
-        cyber_herd_message = cyber_herd_message.format(name=nostr['npub'], difference=difference)
+        cyber_herd_message = cyber_herd_message.format(name=nostr['nprofile'], difference=difference)
         message = message.format(new_amount=new_amount, cyber_herd_message=cyber_herd_message, nostr['npub'], difference=difference)
         
         event_id = nostr['event_id']
