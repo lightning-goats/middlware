@@ -408,7 +408,7 @@ async def webhook(data: HookData):
     description = data.description
     amount = int(data.amount / 1000) if data.amount else 0
     balance = int(await get_balance(client)) / 1000
-    trigger =await update_and_get_trigger_amount(client)
+    trigger = await update_and_get_trigger_amount(client)
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
@@ -417,7 +417,8 @@ async def webhook(data: HookData):
             num_members = len(cyber_herd_dict)
             
             if num_members > 0:
-                payment_per_member = (300000 / num_members) #300 sats
+                random_factor = random.uniform(0.25, 0.48)
+                payment_per_member = (trigger * random_factor) / num_members
 
                 for lud16, item in cyber_herd_dict.items():
                     payment_response = await make_lnurl_payment(lud16, int(payment_per_member),'Cyber Herd Treats')
@@ -432,7 +433,7 @@ async def webhook(data: HookData):
                 
             await send_payment(amount, 0, "feeder_triggered") #reset herd wallet
             
-            #TODO:message = await make_messages(nos_sec, 0, 0, "cyber_treats", cyber_herd_list)
+            #TODO:message = await make_messages(nos_sec, 0, 0, "cyber_herd_treats", cyber_herd_list)
             #TODO:update_message_in_db(message)
     else:
         difference = round(trigger - float(balance))
