@@ -1,43 +1,47 @@
 herd_profile = "nostr:nprofile1qqsxd84men85p8hqgearxes2az8azljn08nydeqa0s3klayk8u7rddshkxjm3"  #should be set in .env
 
 cyber_herd_dict = {
-    0: "⚡ Cyber Herd ⚡\n\nnostr:{name} has joined the ⚡ Cyber Herd ⚡ {difference} sats left until the mayhem ensues.\n\n ",
-    1: "⚡ Cyber Herd ⚡\n\nnostr:{name} is now part of today's ⚡ Cyber Herd ⚡! Just {difference} sats until it's time to snack.\n\n ",
-    2: "⚡ Cyber Herd ⚡\n\nWelcome to the ⚡ Cyber Herd ⚡, nostr:{name}! Only {difference} sats remaining until the feeding frenzy.\n\n ",
-    3: "⚡ Cyber Herd ⚡\n\nCheers to nostr:{name} for joining today's ⚡ Cyber Herd ⚡! {difference} sats before the the herd gets their treats.\n\n ",
-    4: "⚡ Cyber Herd ⚡\n\nnostr:{name} is now a part of the ⚡ Cyber Herd ⚡! Just {difference} more sats until everyone chows down.\n\n ",
-    5: "⚡ Cyber Herd ⚡\n\nA warm welcome to nostr:{name}! Join the⚡ Cyber Herd ⚡and enjoy snack time in {difference} sats.\n\n ",
-    6: "⚡ Cyber Herd ⚡\n\nnostr:{name} is now part of the⚡ Cyber Herd ⚡for today! Counting down: {difference} sats until treats fall from the sky.\n\n ",
-    7: "⚡ Cyber Herd ⚡\n\nnostr:{name} has joined the ⚡ Cyber Herd ⚡! Prepare to trigger the feeder in {difference} sats.\n\n ",
-    8: "⚡ Cyber Herd ⚡\n\nWelcome to the ⚡ Cyber Herd ⚡ nostr:{name}! Almost there! {difference} sats until the goats gobble up their chow.\n\n ",
-    9: "⚡ Cyber Herd ⚡\n\nnostr:{name}, welcome to today's ⚡ Cyber Herd ⚡. The wait continues: {difference} more sats to go.\n\n ",
-    10: "⚡ Cyber Herd ⚡\n\nnostr:{name} joins the ⚡ Cyber Herd ⚡! {difference} sats to go before it's grub time.\n\n ",
-    11: "⚡ Cyber Herd ⚡\n\nWelcome to the ⚡ Cyber Herd ⚡, nostr:{name}! Hang tight, {difference} sats until chow time.\n\n ",
-    13: "⚡ Cyber Herd ⚡\n\nnostr:{name} joins the ⚡ Cyber Herd ⚡! The countdown is on: {difference} sats to go.\n\n ",
-    14: "⚡ Cyber Herd ⚡\n\nThe ⚡ Cyber Herd ⚡ is thrilled to have you, nostr:{name}! T-minus {difference} sats until it's mealtime.\n\n ",
-    15: "⚡ Cyber Herd ⚡\n\nnostr:{name} is in the ⚡ Cyber Herd ⚡! Feeding time is approaching in {difference} sats.\n\n ",
-    16: "⚡ Cyber Herd ⚡\n\nnostr:{name} steps into the ⚡ Cyber Herd ⚡! Mark your clocks and check your blocks: {difference} sats left for feeding.\n\n ",
-    17: "⚡ Cyber Herd ⚡\n\n⚡ Cyber Herd ⚡ welcomes nostr:{name}! On the horizon: {difference} sats to feeding.\n\n ",
-    18: "⚡ Cyber Herd ⚡\n\nnostr:{name} is now a part of the ⚡ Cyber Herd ⚡! {difference} sats until the feeder is triggered.\n\n ",
-    19: "⚡ Cyber Herd ⚡\n\nWelcome to the ⚡ Cyber Herd ⚡, nostr:{name}! The moment is near: {difference} sats until you trigger the goats.\n\n ",
+    0: "nostr:{name} has joined the ⚡ Cyber Herd ⚡ by reposting today's cyber herd note. {difference} sats left until the mayhem ensues, and lightning treats are sent.\n\n ",
+    1: "nostr:{name} is now part of today's ⚡ Cyber Herd ⚡! Just {difference} sats until it's time to snack.\n\n ",
+    2: "Welcome to the ⚡ Cyber Herd ⚡, nostr:{name}! Only {difference} sats remaining until the feeding frenzy.\n\n ",
+    3: "Cheers to nostr:{name} for joining today's ⚡ Cyber Herd ⚡! {difference} sats before the the herd gets their treats.\n\n ",
+    4: "nostr:{name} is now a part of the ⚡ Cyber Herd ⚡! Just {difference} more sats until everyone chows down.\n\n ",
+    5: "A warm welcome to nostr:{name}! Join the⚡ Cyber Herd ⚡and enjoy snack time in {difference} sats.\n\n ",
+    6: "nostr:{name} is now part of the⚡ Cyber Herd ⚡for today! Counting down: {difference} sats until treats fall from the sky.\n\n ",
+    7: "nostr:{name} has joined the ⚡ Cyber Herd ⚡! Prepare to trigger the feeder in {difference} sats.\n\n ",
+    8: "Welcome to the ⚡ Cyber Herd ⚡ nostr:{name}! Almost there! {difference} sats until the goats gobble up their chow.\n\n ",
+    9: "nostr:{name}, welcome to today's ⚡ Cyber Herd ⚡. The wait continues: {difference} more sats to go.\n\n ",
+    10: "nostr:{name} joins the ⚡ Cyber Herd ⚡! {difference} sats to go before it's grub time.\n\n ",
+    11: "Welcome to the ⚡ Cyber Herd ⚡, nostr:{name}! Hang tight, {difference} sats until chow time.\n\n ",
+    13: "nostr:{name} joins the ⚡ Cyber Herd ⚡! The countdown is on: {difference} sats to go.\n\n ",
+    14: "The ⚡ Cyber Herd ⚡ is thrilled to have you, nostr:{name}! T-minus {difference} sats until it's mealtime.\n\n ",
+    15: "nostr:{name} is in the ⚡ Cyber Herd ⚡! Feeding time is approaching in {difference} sats.\n\n ",
+    16: "nostr:{name} steps into the ⚡ Cyber Herd ⚡! Mark your clocks and check your blocks: {difference} sats left for feeding.\n\n ",
+    17: "⚡ Cyber Herd ⚡ welcomes nostr:{name}! On the horizon: {difference} sats to feeding.\n\n ",
+    18: "nostr:{name} is now a part of the ⚡ Cyber Herd ⚡! {difference} sats until the feeder is triggered.\n\n ",
+    19: "Welcome to the ⚡ Cyber Herd ⚡, nostr:{name}! The moment is near: {difference} sats until you get triggered with the goats.\n\n ",
 }
 
 cyber_herd_info_dict = {
     0:"",
 }
 
+cyber_herd_payout_dict = {
+    0:"",
+}
+
 interface_info_dict = {
     1: "To send the goats treats scan the QR Code in the upper right corner with a Lightning wallet and choose the sats you'd like to contribute. Once the feeder reaches 100% the ⚡ Lightning Goats ⚡ will get a mixture of timothy hay pellets and goat granola.",
-    2: "Support the herd on Nostr! Nostr users can send treats to the goats by zapping ⚡ Lightning Goats ⚡ notes on Nostr! Zaps contribute to triggering the feeder.",
-    3: "Each goat has his own Lightning wallet. Sats sent to each goat on Nostr are forwarded to the herd and contribute to triggering the feeder.",
-    4: "In the Spring we'll be adding a second camera and upgrading the ⚡ Lightning Goats ⚡ interfaces to allow people to switch camera scenes using the Lightning Network.",
-    5: "⚡ Cyber Herd ⚡functionality is being worked on to reward Nostr users who interact with the herd on Nostr. Repost notes tagged with #CyberHerd to grab one of ten available spots for the day.",
+    2: "Support the herd on Nostr! Nostr users can send treats to the goats by zapping ⚡ Lightning Goats ⚡ notes. Zaps contribute to triggering the feeder and dispense cool goat facts.",
+    3: "Each goat has his own Lightning wallet. Sats sent to the goats on Nostr are forwarded to the herd and contribute to triggering the feeder.",
+    4: "In the Spring we'll be adding a second camera and upgrading the ⚡ Lightning Goats ⚡ interfaces to allow people to switch camera scenes using the Lightning Network (L402).",
+    5: "⚡ Cyber Herd ⚡functionality is being worked on to reward Nostr users who interact with the herd. Repost notes tagged with #CyberHerd to grab one of ten available spots for the day, and when the herd gets treats so will you.",
     6: "Be sure to like and subscribe to our channel on YouTube. The goats enjoy their jobs and like helping to educate people about Bitcoin and Lightning.",
-    7: "⚡ Lightning Goats ⚡ runs on 100% open-source software, and is powered by solar energy.  We're online during day light hours, starting latter on cloudy days.",
+    7: "⚡ Lightning Goats ⚡ runs on 100% open-source software, and is powered by solar energy.  We're online during day light hours as soon as our batteries are charged enough to broadcast.",
     8: "With a few seconds of video broadcast lag, you can interact with the goats in real-time using the Lightning Network. By sending sats, viewers can trigger the feeder, creating an interactive experience that bridges the digital and natural worlds.  The goats directly benefit from proof of work.",
-    9: "The ⚡ Lightning Goats ⚡ project is not just for entertainment; it's also an educational tool. It provides a practical, fun way to experience Bitcoin and the Lightning Network.",
-    10: "Emphasizing sustainability, the ⚡ Lightning Goats ⚡ showcase how renewable energy and regenerative practices can be integrated with Bitcoin.",
-    11: "Sats donated to the ⚡ Lightning Goats ⚡ feeder not only give the goats treats, they also contribute towards buying hay."
+    9: "The ⚡ Lightning Goats ⚡ project is not just for entertainment; it's also an educational tool. The goat feeder provides a practical, fun way to experience Bitcoin and the Lightning Network.",
+    10: "Emphasizing sustainability, the ⚡ Lightning Goats ⚡ showcase how renewable energy and regenerative practices can be integrated with Bitcoin.  We're working towards becoming a holon.",
+    11: "Sats donated to the ⚡ Lightning Goats ⚡ feeder not only send the goats treats, they also contribute towards buying hay, and help development and hardware costs."
 }
 
 sats_received_dict = {

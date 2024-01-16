@@ -167,7 +167,59 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float):
 
     with shelve.open('mydata.db') as shelf:
         return shelf.get('sats')
-    
+
+async def make_lnurl_payment(lud16: str, amount: int, description: str = None, key: str = herd_key) -> dict:
+    try:
+        # Define the headers for the request
+        headers = {
+            "accept": "application/json",
+            "X-API-KEY": key,
+            "Content-Type": "application/json"
+        }
+
+        # Fetch lnurl data directly from the API
+        lnurl_url = f"https://lnb.bolverker.com/api/v1/lnurlscan/{lud16}"
+        lnurl_response = await client.get(lnurl_url, headers=headers)
+        lnurl_response.raise_for_status()
+        lnurl_data = lnurl_response.json()
+
+        # Validate the amount against minSendable and maxSendable
+        if not (lnurl_data["minSendable"] <= amount <= lnurl_data["maxSendable"]):
+            raise ValueError(f"Amount {amount} is not within the allowed range of {lnurl_data['minSendable']} to {lnurl_data['maxSendable']} millisatoshis.")
+
+        # Validate the length of the comment
+        #if comment and len(comment) > lnurl_data["commentAllowed"]:
+        #    raise ValueError(f"Comment length exceeds the allowed limit of {lnurl_data['commentAllowed']} characters.")
+
+        # Prepare the payload for the payment request
+        payload = {
+            "description_hash": lnurl_data["description_hash"],
+            "callback": lnurl_data["callback"],
+            "amount": amount,
+            "comment":comment if comment is not None else "Cyber Herd Treats",
+            "memo": description if description is not None else "Cyber Herd Treats",
+            "description": description if description is not None else "Cyber Herd Treats",
+            "payerData": {
+                "pubkey": "669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6"
+            }
+        }
+
+        # Make the payment request only if amount is validated
+        payment_url = "https://lnb.bolverker.com/api/v1/payments/lnurl"
+        payment_response = await client.post(payment_url, headers=headers, json=payload)
+        payment_response.raise_for_status()
+        return payment_response.json()
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP request failed with status code: {e.response.status_code}, response: {e.response.text}")
+        raise
+    except httpx.RequestError as e:
+        logger.error(f"HTTP request failed: {e}")
+        raise
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        raise
+
 async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
     try:
         url = "https://lnb.bolverker.com/api/v1/payments"
@@ -267,6 +319,7 @@ class HookData(BaseModel):
     amount: Optional[float] = 0
 
 class CyberHerdData(BaseModel):
+    display_name: str
     event_id: str
     author_pubkey: str
     pubkey: str
@@ -344,7 +397,7 @@ async def webhook(data: HookData):
         logger.info(f'Payment with hash {data.payment_hash} already processed, skipping...')
         return 'payment_already_processed'
 
-    # Add the payment hash to the set and schedule its removal
+    # Add the payment hash to the set and schedule its removal klunk work around for lnbits bug
     processed_payment_hashes.add(data.payment_hash)
     asyncio.create_task(remove_payment_hash_after_delay(data.payment_hash, 5))
         
@@ -354,15 +407,33 @@ async def webhook(data: HookData):
     
     description = data.description
     amount = int(data.amount / 1000) if data.amount else 0
-    balance = float(await get_balance(client)) / 1000
+    balance = int(await get_balance(client)) / 1000
     trigger =await update_and_get_trigger_amount(client)
 
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
-            #TODO: implement cyberherd payouts - will need functions for sending to lud16 addresses for item in cyber_herd_list:
-                #TODO: payout retrieval, summing and updating cyber_herd_list payouts feild. 
+            cyber_herd_list = get_cyber_herd_list()
+            cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
+            num_members = len(cyber_herd_dict)
             
+            if num_members > 0:
+                payment_per_member = (300000 / num_members) #300 sats
+
+                for lud16, item in cyber_herd_dict.items():
+                    payment_response = await make_lnurl_payment(lud16, int(payment_per_member),'Cyber Herd Treats')
+
+                    # Check if the payment was successful
+                    if 'payment_hash' in payment_response:
+                        item['payouts'] += payment_per_member / 1000
+                        
+                        update_cyber_herd_list(list(cyber_herd_dict.values()))
+                        
+                    await asyncio.sleep(.25) # wait a little bit before sending the next payment
+                
             await send_payment(amount, 0, "feeder_triggered") #reset herd wallet
+            
+            #TODO:message = await make_messages(nos_sec, 0, 0, "cyber_treats", cyber_herd_list)
+            #TODO:update_message_in_db(message)
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming

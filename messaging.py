@@ -66,23 +66,22 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message) #format returned message (youtube messages)
     
     if event_type == "cyber_herd":
+        display_name = cyber_herd_item.get('display_name', '')
         event_id = cyber_herd_item.get('event_id', '')
         author_pubkey = cyber_herd_item.get('author_pubkey', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
 
-        # Use these values to format your message
         template = random.choice(list(cyber_herd_dict.values()))
         message = template.format(name=nprofile, difference=difference)
         command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -e {event_id} -p {pub_key} wss://nostr.mutinywallet.com'
-        #command = None
+        
+        if display_name:
+            message = template.format(name=display_name, difference=difference)
     
     if event_type in ["cyber_herd_info", "interface_info"]:
-        # Choose a template from the respective dict and format it
         template = random.choice(list(message_templates.values()))
         message = template.format(new_amount=0, goat_name='', difference_message='')
-
-        # For these event types, format the message but do not run a command
         command = None
 
 
