@@ -409,18 +409,19 @@ async def webhook(data: HookData):
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             if num_members > 0:
-                payment_per_member = math.floor(500000 / num_members)
+                random_factor = random.uniform(0.1, 0.3)
+                payment_per_member = math.floor(((trigger *1000) * random_factor) / num_members)
                 payment_per_member = (payment_per_member // 1000) * 1000
-                treat = int(payment_per_member / 1000)
+                treats = int(payment_per_member / 1000)
                 
                 for lud16, item in cyber_herd_dict.items():
                     payment_response = await make_lnurl_payment(lud16, payment_per_member,'Cyber Herd Treats')
 
                     # Check if the payment was successful
                     if 'payment_hash' in payment_response:
-                        item['payouts'] += treat
+                        item['payouts'] += treats
                         
-                        message = await make_messages(nos_sec, treat, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
+                        message = await make_messages(nos_sec, treats, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
                         update_message_in_db(message)
                         
                         update_cyber_herd_list(list(cyber_herd_dict.values()))
