@@ -1,7 +1,7 @@
 import asyncio
 import random
 import logging
-from messages import sats_received_dict, feeder_trigger_dict, variations, cyber_herd_dict, cyber_herd_info_dict, interface_info_dict
+from messages import sats_received_dict, feeder_trigger_dict, variations, cyber_herd_dict, cyber_herd_info_dict, cyber_herd_treats_dict, interface_info_dict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         "feeder_triggered": feeder_trigger_dict,
         "cyber_herd": cyber_herd_dict,
         "cyber_herd_info": cyber_herd_info_dict,
+        "cyber_herd_treats": cyber_herd_treats_dict,
         "interface_info": interface_info_dict
     }
 
@@ -54,6 +55,8 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         goat_names = join_with_and([name for name, _, _ in selected_goats])
         goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
         goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
+        
+        event_id = cyber_herd_item.get('event_id', '')
 
         variation_message = random.choice(list(variations.values()))
         difference_message = variation_message.format(difference=difference)
@@ -61,7 +64,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_nprofiles, difference_message=difference_message) #format nostr message (nprofiles)
         pubkey_part = ' '.join(f'-p {pubkey}' for pubkey in goat_pubkeys)
         
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com' #-e {event_id}
         
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message) #format returned message (youtube messages)
     
@@ -71,13 +74,31 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         author_pubkey = cyber_herd_item.get('author_pubkey', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
+        
+        if nprofile and not nprofile.startswith("nostr:"):
+            nprofile = f"nostr:{nprofile}"
 
         template = random.choice(list(cyber_herd_dict.values()))
         message = template.format(name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -e {event_id} -p {pub_key} wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -p {pub_key} wss://nostr.mutinywallet.com'
         
         if display_name:
             message = template.format(name=display_name, difference=difference)
+            
+    if event_type == "cyber_herd_treats":
+        display_name = cyber_herd_item.get('display_name', '')
+        event_id = cyber_herd_item.get('event_id', '')
+        author_pubkey = cyber_herd_item.get('author_pubkey', '')
+        pub_key = cyber_herd_item.get('pubkey', '')
+        nprofile = cyber_herd_item.get('nprofile', '')
+        nprofile = "nostr:" + nprofile
+
+        template = random.choice(list(cyber_herd_treats_dict.values()))
+        message = template.format(new_amount=new_amount, name=nprofile, difference=difference)
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -p {pub_key} wss://nostr.mutinywallet.com'
+        
+        if display_name:
+            message = template.format(new_amount=new_amount, name=display_name, difference=difference)
     
     if event_type in ["cyber_herd_info", "interface_info"]:
         template = random.choice(list(message_templates.values()))

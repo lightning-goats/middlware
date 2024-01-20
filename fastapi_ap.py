@@ -14,6 +14,8 @@ import httpx
 import json
 import os
 import logging
+import math
+import random
 
 def validate_env_vars(required_vars):
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -183,20 +185,12 @@ async def make_lnurl_payment(lud16: str, amount: int, description: str = None, k
         lnurl_response.raise_for_status()
         lnurl_data = lnurl_response.json()
 
-        # Validate the amount against minSendable and maxSendable
-        if not (lnurl_data["minSendable"] <= amount <= lnurl_data["maxSendable"]):
-            raise ValueError(f"Amount {amount} is not within the allowed range of {lnurl_data['minSendable']} to {lnurl_data['maxSendable']} millisatoshis.")
-
-        # Validate the length of the comment
-        #if comment and len(comment) > lnurl_data["commentAllowed"]:
-        #    raise ValueError(f"Comment length exceeds the allowed limit of {lnurl_data['commentAllowed']} characters.")
-
         # Prepare the payload for the payment request
         payload = {
             "description_hash": lnurl_data["description_hash"],
             "callback": lnurl_data["callback"],
             "amount": amount,
-            "comment":comment if comment is not None else "Cyber Herd Treats",
+            "comment": "Cyber Herd Treats",
             "memo": description if description is not None else "Cyber Herd Treats",
             "description": description if description is not None else "Cyber Herd Treats",
             "payerData": {
@@ -369,7 +363,7 @@ async def trigger_feeder(client: httpx.AsyncClient):
         logger.error(f'Failed to trigger the feeder rule: {e}')
         return False
 
-async def send_payment(amount: float, difference: float, event: str):
+async def send_payment():
     for retry in range(3):
          # Convert to millisats, keep 10%
         balance = await get_balance(client)
@@ -380,9 +374,7 @@ async def send_payment(amount: float, difference: float, event: str):
         payment_status = await pay_invoice(client, payment_request)
 
         if payment_status == 201:
-            message = await make_messages(nos_sec, amount, difference, event)
-            update_message_in_db(message)
-            break
+            return payment_status
         else:
             logger.error(f"Failed to send payment on attempt {retry + 1}, status code: {payment_status}")
 
@@ -409,36 +401,43 @@ async def webhook(data: HookData):
     amount = int(data.amount / 1000) if data.amount else 0
     balance = int(await get_balance(client)) / 1000
     trigger = await update_and_get_trigger_amount(client)
-
+    cyber_herd_list = get_cyber_herd_list()
+    cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
+    num_members = len(cyber_herd_dict)
+    first_item = next(iter(cyber_herd_dict.values()))
+    
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
-            cyber_herd_list = get_cyber_herd_list()
-            cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
-            num_members = len(cyber_herd_dict)
-            
             if num_members > 0:
-                random_factor = random.uniform(0.25, 0.48)
-                payment_per_member = (trigger * random_factor) / num_members
+                balance = balance * 1000
+                random_factor = random.uniform(0.1, 0.2)
+                payment_per_member = math.floor((balance * random_factor) / num_members)
+                payment_per_member = (payment_per_member // 1000) * 1000
 
                 for lud16, item in cyber_herd_dict.items():
-                    payment_response = await make_lnurl_payment(lud16, int(payment_per_member),'Cyber Herd Treats')
+                    payment_response = await make_lnurl_payment(lud16, payment_per_member,'Cyber Herd Treats')
 
                     # Check if the payment was successful
                     if 'payment_hash' in payment_response:
                         item['payouts'] += payment_per_member / 1000
                         
+                        payment_per_member = int(payment_per_member / 1000)
+                        message = await make_messages(nos_sec, payment_per_member, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
+                        update_message_in_db(message)
+                        
                         update_cyber_herd_list(list(cyber_herd_dict.values()))
                         
                     await asyncio.sleep(.25) # wait a little bit before sending the next payment
                 
-            await send_payment(amount, 0, "feeder_triggered") #reset herd wallet
+            status = await send_payment() #reset herd wallet
             
-            #TODO:message = await make_messages(nos_sec, 0, 0, "cyber_herd_treats", cyber_herd_list)
-            #TODO:update_message_in_db(message)
+            if status == 201:
+                message = await make_messages(nos_sec, amount, 0, "feeder_triggered", first_item)
+                update_message_in_db(message)
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            message = await make_messages(nos_sec, amount, difference, "sats_received")
+            message = await make_messages(nos_sec, amount, difference, "sats_received", first_item)
             update_message_in_db(message)
             return "received"
     return 'payment_processed'
