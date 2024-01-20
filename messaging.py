@@ -56,7 +56,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
         goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
         
-        event_id = cyber_herd_item.get('event_id', '')
+        #event_id = cyber_herd_item.get('event_id', '')
 
         variation_message = random.choice(list(variations.values()))
         difference_message = variation_message.format(difference=difference)

@@ -28,7 +28,8 @@ cyber_herd_info_dict = {
 
 cyber_herd_treats_dict = {
     0:"{name} just got {new_amount} sats as part of the ⚡ Cyber Herd ⚡.",
-    1:"Treats for{name}: {new_amount} sats. Join the ⚡ Cyber Herd ⚡.",
+    1:"{new_amount} sats for {name}. Join the ⚡ Cyber Herd ⚡ by reposting today's CyberHerd tagged note.",
+    2:"Check your wallet for {new_amount} sats {name}, the ⚡ Cyber Herd ⚡ is dispensing treats."
 }
 
 interface_info_dict = {
@@ -118,7 +119,7 @@ sats_received_dict = {
     69: "Grateful for the {new_amount} sats! {difference_message} Goats like {goat_name} aid in sequestering carbon through natural grazing, playing a role in soil health.",
     70: "Your {new_amount} sats support the herd! {difference_message} Goats, like {goat_name}, are integral to permaculture systems, contributing to soil health and plant diversity.",
     71: "Thanks for the {new_amount} sats! {difference_message} Goats such as {goat_name} aid in creating sustainable food systems through natural grazing.",
-    72: "{new_amount} sats received! {difference_message} Goats, including {goat_name}, play a vital role in permaculture by providing natural fertilization and land management.",
+    72: "{new_amount} sats received! {difference_message} Goats, including {goat_name}, play a vital role in providing natural fertilization and land management.",
     73: "We appreciate your {new_amount} sats! {difference_message} Goats like {goat_name} help maintain ecological balance.",
     74: "Your donation of {new_amount} sats strengthens the Bitcoin Standard! {difference_message} In permaculture settings, goats, such as {goat_name}, are used for their ability to control invasive species and enhance biodiversity.",
     76: "Grateful for your {new_amount} sats! {difference_message} Goats like {goat_name} are effective in permaculture systems, aiding in composting and soil improvement.",

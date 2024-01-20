@@ -404,25 +404,23 @@ async def webhook(data: HookData):
     cyber_herd_list = get_cyber_herd_list()
     cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
     num_members = len(cyber_herd_dict)
-    first_item = next(iter(cyber_herd_dict.values()))
+    #first_item = next(iter(cyber_herd_dict.values()))
     
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             if num_members > 0:
-                balance = balance * 1000
-                random_factor = random.uniform(0.1, 0.2)
-                payment_per_member = math.floor((balance * random_factor) / num_members)
+                payment_per_member = math.floor(500000 / num_members)
                 payment_per_member = (payment_per_member // 1000) * 1000
-
+                treat = int(payment_per_member / 1000)
+                
                 for lud16, item in cyber_herd_dict.items():
                     payment_response = await make_lnurl_payment(lud16, payment_per_member,'Cyber Herd Treats')
 
                     # Check if the payment was successful
                     if 'payment_hash' in payment_response:
-                        item['payouts'] += payment_per_member / 1000
+                        item['payouts'] += treat
                         
-                        payment_per_member = int(payment_per_member / 1000)
-                        message = await make_messages(nos_sec, payment_per_member, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
+                        message = await make_messages(nos_sec, treat, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
                         update_message_in_db(message)
                         
                         update_cyber_herd_list(list(cyber_herd_dict.values()))
@@ -432,12 +430,12 @@ async def webhook(data: HookData):
             status = await send_payment() #reset herd wallet
             
             if status == 201:
-                message = await make_messages(nos_sec, amount, 0, "feeder_triggered", first_item)
+                message = await make_messages(nos_sec, amount, 0, "feeder_triggered")
                 update_message_in_db(message)
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            message = await make_messages(nos_sec, amount, difference, "sats_received", first_item)
+            message = await make_messages(nos_sec, amount, difference, "sats_received")
             update_message_in_db(message)
             return "received"
     return 'payment_processed'
