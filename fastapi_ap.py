@@ -432,7 +432,7 @@ async def webhook(data: HookData):
                             print(f"An error occurred during payment for {lud16}: {e}")
                             continue  # Skip the rest of the loop for this record
 
-                        await asyncio.sleep(.1)  # wait a little before the next payment
+                        await asyncio.sleep(.01)  # wait a little before the next payment
 
             status = await send_payment()  # reset herd wallet
             
