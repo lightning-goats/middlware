@@ -7,7 +7,7 @@ from typing import Optional
 from googleapiclient.discovery import build
 from urllib.parse import quote
 from dotenv import load_dotenv
-from messaging import make_messages
+import messaging
 import asyncio
 import shelve
 import httpx
@@ -15,6 +15,7 @@ import json
 import os
 import logging
 import math
+import os
 import random
 
 def validate_env_vars(required_vars):
@@ -192,10 +193,7 @@ async def make_lnurl_payment(lud16: str, amount: int, description: str = None, k
             "amount": amount,
             "comment": "Cyber Herd Treats",
             "memo": description if description is not None else "Cyber Herd Treats",
-            "description": description if description is not None else "Cyber Herd Treats",
-            "payerData": {
-                "pubkey": "669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6"
-            }
+            "description": description if description is not None else "Cyber Herd Treats"
         }
 
         # Make the payment request only if amount is validated
@@ -315,11 +313,10 @@ class HookData(BaseModel):
 class CyberHerdData(BaseModel):
     display_name: str
     event_id: str
-    author_pubkey: str
     pubkey: str
     nprofile: str
     lud16: str
-    notified: bool = False
+    notified: str = None
     payouts: int = 0
     
 def get_cyber_herd_list():
@@ -327,19 +324,25 @@ def get_cyber_herd_list():
         return shelf.get('cyber_herd_list', [])
 
 def update_cyber_herd_list(new_data: List[dict], reset=False):  
-    with shelve.open('cyber_herd_data.db', writeback=True) as shelf:
-        if reset:
-            # This removes the key entirely from the database
-            del shelf['cyber_herd_list']
-        else:
-            cyber_herd_dict = {item['pubkey']: item for item in shelf.get('cyber_herd_list', [])}
+    db_path = 'cyber_herd_data.db'
+    
+    if reset:
+        # Close and delete the database file
+        with shelve.open(db_path) as shelf:
+            shelf.close()  # Explicitly close the shelf before deleting the file
+        os.remove(db_path)
+        print("Database has been completely deleted.")
+        return
 
-            for new_item_dict in new_data:  # new_item_dict is already a dictionary
-                pubkey = new_item_dict['pubkey']
-                cyber_herd_dict[pubkey] = new_item_dict  # Update or add the new item
+    with shelve.open(db_path, writeback=True) as shelf:
+        cyber_herd_dict = {item['pubkey']: item for item in shelf.get('cyber_herd_list', [])}
 
-            updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
-            shelf['cyber_herd_list'] = updated_cyber_herd_list
+        for new_item_dict in new_data:  # new_item_dict is already a dictionary
+            pubkey = new_item_dict['pubkey']
+            cyber_herd_dict[pubkey] = new_item_dict  # Update or add the new item
+
+        updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+        shelf['cyber_herd_list'] = updated_cyber_herd_list
 
 class Message(BaseModel):
     content: str
@@ -404,39 +407,43 @@ async def webhook(data: HookData):
     cyber_herd_list = get_cyber_herd_list()
     cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
     num_members = len(cyber_herd_dict)
-    #first_item = next(iter(cyber_herd_dict.values()))
     
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             if num_members > 0:
-                random_factor = random.uniform(0.1, 0.3)
-                payment_per_member = math.floor(((trigger *1000) * random_factor) / num_members)
+                random_factor = random.uniform(0.25, 0.5)
+                payment_per_member = math.floor(((trigger * 1000) * random_factor) / num_members)
                 payment_per_member = (payment_per_member // 1000) * 1000
                 treats = int(payment_per_member / 1000)
-                
+            
                 for lud16, item in cyber_herd_dict.items():
-                    payment_response = await make_lnurl_payment(lud16, payment_per_member,'Cyber Herd Treats')
+                    if lud16 is not None:
+                        try:
+                            payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Cyber Herd Treats')
+                                
+                            if 'payment_hash' in payment_response:
+                                item['payouts'] += treats
+                                message = await messaging.make_messages(nos_sec, treats, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
+                                update_message_in_db(message)
+                                update_cyber_herd_list(list(cyber_herd_dict.values()))
 
-                    # Check if the payment was successful
-                    if 'payment_hash' in payment_response:
-                        item['payouts'] += treats
-                        
-                        message = await make_messages(nos_sec, treats, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
-                        update_message_in_db(message)
-                        
-                        update_cyber_herd_list(list(cyber_herd_dict.values()))
-                        
-                    await asyncio.sleep(.25) # wait a little bit before sending the next payment
-                
-            status = await send_payment() #reset herd wallet
+                        except Exception as e:
+                            # Handle any exceptions that occur during the payment
+                            print(f"An error occurred during payment for {lud16}: {e}")
+                            continue  # Skip the rest of the loop for this record
+
+                        await asyncio.sleep(.1)  # wait a little before the next payment
+
+            status = await send_payment()  # reset herd wallet
             
             if status == 201:
-                message = await make_messages(nos_sec, amount, 0, "feeder_triggered")
+                message = await messaging.make_messages(nos_sec, amount, 0, "feeder_triggered")
                 update_message_in_db(message)
+
     else:
         difference = round(trigger - float(balance))
         if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
-            message = await make_messages(nos_sec, amount, difference, "sats_received")
+            message = await messaging.make_messages(nos_sec, amount, difference, "sats_received")
             update_message_in_db(message)
             return "received"
     return 'payment_processed'
@@ -466,17 +473,17 @@ async def update_cyber_herd(data: List[CyberHerdData]):
     for item in data:
         item_dict = item.dict()
         pubkey = item_dict['pubkey']
-        
-        # Check if the item is new or if its notified status is False
-        if pubkey not in cyber_herd_dict or not cyber_herd_dict[pubkey].get('notified', False):
-            item_dict['notified'] = False  # Set notified to False for new items
-            cyber_herd_dict[pubkey] = item_dict  # Update or add the item in the dictionary
 
-            # Send message and update notified status
-            if not item_dict['notified']:
-                message = await make_messages(nos_sec, 0, difference, "cyber_herd", item_dict)
-                update_message_in_db(message)
-                item_dict['notified'] = True  # Update notified status
+        # If pubkey not in cyber_herd_dict, add it with notified set to None
+        if pubkey not in cyber_herd_dict:
+            cyber_herd_dict[pubkey] = item_dict
+            cyber_herd_dict[pubkey]['notified'] = None
+
+        # Check if 'notified' is None or empty, indicating notification has not been sent
+        if not cyber_herd_dict[pubkey].get('notified'):
+            message = await messaging.make_messages(nos_sec, 0, difference, "cyber_herd", item_dict)
+            update_message_in_db(message)
+            cyber_herd_dict[pubkey]['notified'] = messaging.notified.get('id')
 
     # Update the list from the dictionary and trim to the last 10 records
     updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
@@ -485,7 +492,6 @@ async def update_cyber_herd(data: List[CyberHerdData]):
     update_cyber_herd_list(updated_cyber_herd_list)
 
     return {"status": "success"}
-
 
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
@@ -547,7 +553,7 @@ async def create_info_message():
     
     try:
         # Create a new informational message
-        message_data = await make_messages(nos_sec, 0, 0, "interface_info")
+        message_data = await messaging.make_messages(nos_sec, 0, 0, "interface_info")
         update_message_in_db(message_data)
         json_messages = retrieve_messages()
         messages = json.loads(json_messages)

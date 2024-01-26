@@ -1,10 +1,25 @@
 import asyncio
 import random
 import logging
+import json
 from messages import sats_received_dict, feeder_trigger_dict, variations, cyber_herd_dict, cyber_herd_info_dict, cyber_herd_treats_dict, interface_info_dict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+notified={}
+
+def extract_id_from_stdout(stdout):
+    try:
+        # Parse the stdout string as JSON
+        data = json.loads(stdout)
+        
+        # Extract the 'id' field
+        return data.get('id', None)
+    except json.JSONDecodeError as e:
+        # Handle possible JSON parsing error
+        print(f"Error parsing JSON from stdout: {e}")
+        return None
 
 def get_random_goat_names(goat_names_dict):
     keys = list(goat_names_dict.keys())
@@ -23,6 +38,8 @@ def join_with_and(items):
         return ''
 
 async def make_messages(nos_sec: str, new_amount: float, difference: float, event_type: str, cyber_herd_item: list=None):
+    global notified
+    
     goat_names_dict = {
         "Dexter": ["nostr:nprofile1qqsw4zlzyfx43mc88psnlse8sywpfl45kuap9dy05yzkepkvu6ca5wg7qyak5", "ea8be2224d58ef0738613fc327811c14feb4b73a12b48fa1056c86cce6b1da39"],
         "Rowan": ["nostr:nprofile1qqs2w94r0fs29gepzfn5zuaupn969gu3fstj3gq8kvw3cvx9fnxmaugwur22r", "a716a37a60a2a32112674173bc0ccba2a3914c1728a007b31d1c30c54ccdbef1"],
@@ -64,14 +81,13 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_nprofiles, difference_message=difference_message) #format nostr message (nprofiles)
         pubkey_part = ' '.join(f'-p {pubkey}' for pubkey in goat_pubkeys)
         
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com' #-e {event_id}
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com'
         
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message) #format returned message (youtube messages)
     
     if event_type == "cyber_herd":
         display_name = cyber_herd_item.get('display_name', '')
         event_id = cyber_herd_item.get('event_id', '')
-        author_pubkey = cyber_herd_item.get('author_pubkey', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
         
@@ -80,22 +96,21 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
 
         template = random.choice(list(cyber_herd_dict.values()))
         message = template.format(name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -p {pub_key} wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;root" -p 669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6 -p {pub_key} wss://nostr.mutinywallet.com'
         
         if display_name:
             message = template.format(name=display_name, difference=difference)
             
     if event_type == "cyber_herd_treats":
         display_name = cyber_herd_item.get('display_name', '')
-        event_id = cyber_herd_item.get('event_id', '')
-        author_pubkey = cyber_herd_item.get('author_pubkey', '')
+        event_id = cyber_herd_item.get('notified', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
-        nprofile = "nostr:" + nprofile
+        nprofile = f"nostr:{nprofile}"
 
         template = random.choice(list(cyber_herd_treats_dict.values()))
         message = template.format(new_amount=new_amount, name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats -p {pub_key} wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;reply" -p 669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6 -p {pub_key}  wss://nostr.mutinywallet.com'
         
         if display_name:
             message = template.format(new_amount=new_amount, name=display_name, difference=difference)
@@ -117,6 +132,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
             logger.error(f"Command failed with error: {stderr.decode()}")
         else:
             logger.info(f"Command output: {stdout.decode()}")
+            notified['id'] = extract_id_from_stdout(stdout.decode())
 
     return message
 

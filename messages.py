@@ -27,10 +27,17 @@ cyber_herd_info_dict = {
 }
 
 cyber_herd_treats_dict = {
-    0:"{name} just got {new_amount} sats as part of the ⚡ Cyber Herd ⚡.",
-    1:"{new_amount} sats for {name}. Join the ⚡ Cyber Herd ⚡ by reposting today's CyberHerd tagged note.",
-    2:"Check your wallet for {new_amount} sats {name}, the ⚡ Cyber Herd ⚡ is dispensing treats."
+    0: "{name} just got {new_amount} sats as part of the ⚡ Cyber Herd ⚡.",
+    1: "{new_amount} sats for {name}. Join the ⚡ Cyber Herd ⚡ by reposting today's CyberHerd tagged note.",
+    2: "Check your wallet for {new_amount} sats {name}, the ⚡ Cyber Herd ⚡ feeder is dispensing treats.",
+    3: "You've got treats, {name}! Enjoy {new_amount} sats as part the ⚡ Cyber Herd ⚡.",
+    4: "{name}, your part of the ⚡ Cyber Herd ⚡ treats is {new_amount} sats. Keep the momentum!",
+    5: "{name}, {new_amount} sats have been added to your stash by the ⚡ Cyber Herd ⚡ feeder.",
+    6: "Spend the day with the ⚡ Cyber Herd ⚡, {name}! Your part of this feeding is {new_amount} sats.",
+    7: "Congratulations, {name}! You've earned {new_amount} sats from your ⚡ Cyber Herd ⚡ activities.",
+    8: "Hey {name}, your wallet just got beefier with {new_amount} sats.  ⚡ Cyber Herd ⚡"
 }
+
 
 interface_info_dict = {
     1: "To send the goats treats scan the QR Code in the upper right corner with a Lightning wallet and choose the sats you'd like to contribute. Once the feeder reaches 100% the ⚡ Lightning Goats ⚡ will get a mixture of timothy hay pellets and goat granola.",
@@ -42,7 +49,7 @@ interface_info_dict = {
     7: "⚡ Lightning Goats ⚡ runs on 100% open-source software, and is powered by solar energy.  We're online during day light hours as soon as our batteries are charged enough to broadcast.",
     8: "With a few seconds of video broadcast lag, you can interact with the goats in real-time using the Lightning Network. By sending sats, viewers can trigger the feeder, creating an interactive experience that bridges the digital and natural worlds.  The goats directly benefit from proof of work.",
     9: "The ⚡ Lightning Goats ⚡ project is not just for entertainment; it's also an educational tool. The goat feeder provides a practical, fun way to experience Bitcoin and the Lightning Network.",
-    10: "Emphasizing sustainability, the ⚡ Lightning Goats ⚡ showcase how renewable energy and regenerative practices can be integrated with Bitcoin.  We're working towards becoming a holon.",
+    10: "Emphasizing sustainability, the ⚡ Lightning Goats ⚡ showcase how renewable energy and regenerative practices can be integrated with Bitcoin.",
     11: "Sats donated to the ⚡ Lightning Goats ⚡ feeder not only send the goats treats, they also contribute towards buying hay, and help development and hardware costs."
 }
 
