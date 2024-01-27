@@ -420,9 +420,11 @@ async def webhook(data: HookData):
                 for lud16, item in cyber_herd_dict.items():
                     if lud16 is not None:
                         try:
-                            if item['kind'] == 6:
+                            kind = item.get('kind')
+                            
+                            if kind == "6":
                                 payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 6 Cyber Herd Treats')
-                            if item['kind'] == 7 or item['kind'] is None:
+                            if kind == "7" or kind is None:
                                 payment_per_member7 = payment_per_member * .1
                                 payment_per_member7 = math.floor(payment_per_member7)
                                 payment_response = await make_lnurl_payment(lud16, payment_per_member7, 'Kind 7 Cyber Herd Treats')
