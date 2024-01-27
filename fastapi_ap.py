@@ -313,6 +313,7 @@ class HookData(BaseModel):
 class CyberHerdData(BaseModel):
     display_name: str
     event_id: str
+    kind: str
     pubkey: str
     nprofile: str
     lud16: str
@@ -411,7 +412,7 @@ async def webhook(data: HookData):
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             if num_members > 0:
-                random_factor = random.uniform(0.25, 0.5)
+                random_factor = random.uniform(0.2, 0.5)
                 payment_per_member = math.floor(((trigger * 1000) * random_factor) / num_members)
                 payment_per_member = (payment_per_member // 1000) * 1000
                 treats = int(payment_per_member / 1000)
@@ -419,7 +420,12 @@ async def webhook(data: HookData):
                 for lud16, item in cyber_herd_dict.items():
                     if lud16 is not None:
                         try:
-                            payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Cyber Herd Treats')
+                            if item['kind'] == 6:
+                                payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 6 Cyber Herd Treats')
+                            if item['kind'] == 7 or item['kind'] is None:
+                                payment_per_member7 = payment_per_member * .1
+                                payment_per_member7 = math.floor(payment_per_member7)
+                                payment_response = await make_lnurl_payment(lud16, payment_per_member7, 'Kind 7 Cyber Herd Treats')
                                 
                             if 'payment_hash' in payment_response:
                                 item['payouts'] += treats
