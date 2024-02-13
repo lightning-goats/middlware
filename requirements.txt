@@ -1,6 +1,0 @@
-dotenv
-fastapi
-googleapiclient
-httpx
-pydantic
-
