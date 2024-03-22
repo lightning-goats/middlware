@@ -81,7 +81,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_nprofiles, difference_message=difference_message) #format nostr message (nprofiles)
         pubkey_part = ' '.join(f'-p {pubkey}' for pubkey in goat_pubkeys)
         
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats {pubkey_part} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
         
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message) #format returned message (youtube messages)
     
@@ -95,8 +95,8 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
             nprofile = f"nostr:{nprofile}"
 
         template = random.choice(list(cyber_herd_dict.values()))
-        message = template.format(name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;root" -p 669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6 -p {pub_key} wss://nostr.mutinywallet.com'
+        message = template.format(name=nprofile, difference=difference, event_id=event_id)
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;root" -p {pub_key} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
         
         if display_name:
             message = template.format(name=display_name, difference=difference)
@@ -110,7 +110,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
 
         template = random.choice(list(cyber_herd_treats_dict.values()))
         message = template.format(new_amount=new_amount, name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;reply" -p 669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6 -p {pub_key}  wss://nostr.mutinywallet.com'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;reply" -p {pub_key}  ws://127.0.0.1:3002/nostrclient/api/v1/relay'
         
         if display_name:
             message = template.format(new_amount=new_amount, name=display_name, difference=difference)

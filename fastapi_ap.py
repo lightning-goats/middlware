@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import random
+import time
 
 def validate_env_vars(required_vars):
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -24,23 +25,50 @@ def validate_env_vars(required_vars):
         missing_vars_str = ', '.join(missing_vars)
         raise ValueError(f"The following environment variables are missing: {missing_vars_str}")
 
+# lnbits url
+lnbits = 'http://127.0.0.1:3002'
+
+#openhab url
+openhab ='http://10.8.0.6:8080'
+
 # Load the environment variables
 load_dotenv()
 
 # List all the environment variables that your application depends on
-required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'API_URL', 'GOOGLE_API_KEY', 'NOS_SEC']
+required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC']
 validate_env_vars(required_env_vars)
 
 ohauth1 = os.getenv('OH_AUTH_1')
 api_key = os.getenv('API_KEY')
 herd_key = os.getenv('HERD_KEY')
 sat_key = os.getenv('SAT_KEY')
-api_url= os.getenv('API_URL')
 google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
 
 cyber_herd_list = []
 message_list = []
+
+# Cache for balance with an expiration time
+balance_cache = {
+    'balance': None,
+    'expires_at': 0
+}
+
+conversion_cache = {
+    'usd_to_sats': {},
+    'expires_at': 0
+}
+
+trigger_amount_cache = {
+    'trigger_amount': None,
+    'expires_at': 0
+}
+
+live_video_cache = {
+    'video_id': None,
+    'date': None,
+    'expires_at': 0
+}
 
 # Set to keep track of processed payment hashes
 processed_payment_hashes = set()
@@ -84,29 +112,44 @@ def convert_to_dict(message_data):
     # If it's already a dictionary, return as is
     elif isinstance(message_data, dict):
         return message_data
-        
-def set_trigger_amount(amount):
-    with shelve.open('mydata.db') as shelf:
-        shelf['trigger_amount'] = amount
 
 def get_trigger_amount():
-    with shelve.open('mydata.db') as shelf:
-        return shelf.get('trigger_amount')
-        
-async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.0):
-    sats = await convert_to_sats(client, amount_in_usd)
-    if sats is not None and sats != 0:
-        set_trigger_amount(sats)
-    return sats
+    return trigger_amount_cache['trigger_amount']
+
+async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.0, force_refresh=False):
+    current_time = time.time()
+    cached_trigger_amount = trigger_amount_cache['trigger_amount']
+    expires_at = trigger_amount_cache['expires_at']
+
+    # Check if the cache is valid and not expired
+    if cached_trigger_amount is not None and current_time < expires_at and not force_refresh:
+        return cached_trigger_amount
+
+    try:
+        sats = await convert_to_sats(client, amount_in_usd)
+        if sats is not None and sats != 0:
+            # Update the cache with the new trigger amount and set an expiration time (e.g., 60 seconds)
+            trigger_amount_cache['trigger_amount'] = sats
+            trigger_amount_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
+            return sats
+        else:
+            return get_trigger_amount()
+    except Exception as e:
+        logger.error(f'Failed to update and get trigger amount: {e}')
+        return get_trigger_amount()
 
 async def get_live_video_id(api_key, channel_id):
+    current_time = time.time()
     today = datetime.now().date()
-    with shelve.open('live_video_data.db') as shelf:
-        if 'video_id' in shelf and 'date' in shelf and shelf['date'] == today:
-            # Return the stored video ID if it's from today
-            return shelf['video_id']
+    cached_video_id = live_video_cache['video_id']
+    cached_date = live_video_cache['date']
+    expires_at = live_video_cache['expires_at']
 
-    # If no valid stored ID, fetch a new one
+    # Check if the cache is valid and not expired, and the date matches today
+    if cached_video_id is not None and current_time < expires_at and cached_date == today:
+        return cached_video_id
+
+    # If no valid cached ID or the cache is expired, fetch a new one
     url = "https://www.googleapis.com/youtube/v3/search"
     params = {
         "part": "id",
@@ -123,54 +166,72 @@ async def get_live_video_id(api_key, channel_id):
         data = response.json()
         if 'items' in data and len(data['items']) > 0:
             video_id = data['items'][0]['id']['videoId']
-            # Store the new video ID with the current date
-            with shelve.open('live_video_data.db') as shelf:
-                shelf['video_id'] = video_id
-                shelf['date'] = today
+            # Update the cache with the new video ID, date, and set an expiration time (12 hours)
+            live_video_cache['video_id'] = video_id
+            live_video_cache['date'] = today
+            live_video_cache['expires_at'] = current_time + 43200  # Cache expires in 12 hours
             return video_id
+
     return None
 
-async def get_balance(client: httpx.AsyncClient):
+async def get_balance(client: httpx.AsyncClient, force_refresh=False):
+    current_time = time.time()
+    cached_balance = balance_cache['balance']
+    expires_at = balance_cache['expires_at']
+
+    # Check if the cache is valid and not expired
+    if cached_balance is not None and current_time < expires_at and not force_refresh:
+        return cached_balance
+
     try:
-        response = await client.get(api_url, headers={'X-Api-Key': api_key})
+        response = await client.get(F'{lnbits}/api/v1/wallet', headers={'X-Api-Key': api_key})
         if response.status_code == 200:
             balance = response.json().get('balance')
-            if balance != 0:
-                with shelve.open('mydata.db') as shelf:
-                    shelf['balance'] = balance
+            if balance is not None:
+                # Update the cache with the new balance and set an expiration time (e.g., 60 seconds)
+                balance_cache['balance'] = balance
+                balance_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
                 return balance
             else:
-                return shelf.get('balance')
+                return cached_balance  # Return the cached balance if the new balance is None
         else:
             logger.error(f'Failed to retrieve balance, status code: {response.status_code}')
     except httpx.RequestError as e:
         logger.error(f'Failed to retrieve balance: {e}')
 
-    with shelve.open('mydata.db') as shelf:
-        return shelf.get('balance')
+    return cached_balance  # Return the cached balance if the request fails
 
-async def convert_to_sats(client: httpx.AsyncClient, amount: float):
+async def convert_to_sats(client: httpx.AsyncClient, amount: float, force_refresh=False):
+    current_time = time.time()
+    cached_conversion = conversion_cache['usd_to_sats'].get(amount)
+    expires_at = conversion_cache['expires_at']
+
+    # Check if the cache is valid and not expired
+    if cached_conversion is not None and current_time < expires_at and not force_refresh:
+        return cached_conversion
+
     try:
         payload = {
             "from_": "usd",
             "amount": amount,
             "to": "sat"
         }
-        response = await client.post('https://lnb.bolverker.com/api/v1/conversion', headers=headers, json=payload)
+        response = await client.post(f'{lnbits}/api/v1/conversion', headers=headers, json=payload)
         if response.status_code == 200:
             sats = response.json()['sats']
-            if sats != 0:
-                with shelve.open('mydata.db') as shelf:
-                    shelf['sats'] = sats
+            if sats is not None:
+                # Update the cache with the new conversion rate and set an expiration time (e.g., 60 seconds)
+                conversion_cache['usd_to_sats'][amount] = sats
+                conversion_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
                 return sats
+            else:
+                return cached_conversion  # Return the cached conversion rate if the new rate is None
         else:
             logger.error(f'Failed to convert amount, status code: {response.status_code}')
     except httpx.RequestError as e:
         logger.error(f'Failed to convert amount: {e}')
 
-    with shelve.open('mydata.db') as shelf:
-        return shelf.get('sats')
-
+    return cached_conversion  # Return the cached conversion rate if the request fails
 async def make_lnurl_payment(lud16: str, amount: int, description: str = None, key: str = herd_key) -> dict:
     try:
         # Define the headers for the request
@@ -181,11 +242,16 @@ async def make_lnurl_payment(lud16: str, amount: int, description: str = None, k
         }
 
         # Fetch lnurl data directly from the API
-        lnurl_url = f"https://lnb.bolverker.com/api/v1/lnurlscan/{lud16}"
+        lnurl_url = f'{lnbits}/api/v1/lnurlscan/{lud16}'
         lnurl_response = await client.get(lnurl_url, headers=headers)
         lnurl_response.raise_for_status()
         lnurl_data = lnurl_response.json()
-
+        
+        #if lnurl_data["allowsNostr"] == True and lnurl_data["nostrPubkey"]:
+        #todo: get lnurl
+        #todo: construct and sign nostr event
+            #payment_response = await client.get(lnurl_data["callback"], amount=amount, nostr=nostr, lnurl-lnurl) #?amount=${amount}&nostr=${event}&lnurl=${lnurl}`        
+        #else:
         # Prepare the payload for the payment request
         payload = {
             "description_hash": lnurl_data["description_hash"],
@@ -195,10 +261,10 @@ async def make_lnurl_payment(lud16: str, amount: int, description: str = None, k
             "memo": description if description is not None else "Cyber Herd Treats",
             "description": description if description is not None else "Cyber Herd Treats"
         }
-
-        # Make the payment request only if amount is validated
-        payment_url = "https://lnb.bolverker.com/api/v1/payments/lnurl"
+        
+        payment_url = f'{lnbits}/api/v1/payments/lnurl'
         payment_response = await client.post(payment_url, headers=headers, json=payload)
+           
         payment_response.raise_for_status()
         return payment_response.json()
 
@@ -214,7 +280,7 @@ async def make_lnurl_payment(lud16: str, amount: int, description: str = None, k
 
 async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
     try:
-        url = "https://lnb.bolverker.com/api/v1/payments"
+        url = f'{lnbits}/api/v1/payments'
 
         headers = {
             "accept": "application/json",
@@ -250,7 +316,7 @@ async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key:
         
 async def pay_invoice(client: httpx.AsyncClient, payment_request: str, key: str = herd_key):  # key is from wallet
     try:
-        url = "https://lnb.bolverker.com/api/v1/payments"
+        url = f'{lnbits}/api/v1/payments'
 
         headers = {
             "accept": "application/json",
@@ -276,11 +342,6 @@ async def pay_invoice(client: httpx.AsyncClient, payment_request: str, key: str 
     except httpx.RequestError as e:
         logger.error(f'Failed to pay invoice: {e}')
         return None
-
-async def remove_payment_hash_after_delay(payment_hash: str, delay: int):
-    await asyncio.sleep(delay)
-    processed_payment_hashes.discard(payment_hash)  # Use discard to avoid KeyError if hash is not present
-    logger.debug(f"Expired payment hash: {payment_hash}")
 
 def retrieve_messages():
     try:
@@ -313,12 +374,20 @@ class HookData(BaseModel):
 class CyberHerdData(BaseModel):
     display_name: str
     event_id: str
-    kind: str
+    kind: str = None
     pubkey: str
     nprofile: str
     lud16: str
     notified: str = None
     payouts: int = 0
+    
+class InvoiceRequest(BaseModel):
+    amount: int
+    memo: str
+    key: str = herd_key  # Optional in the request body; will use herd_key if not provided
+    
+class Message(BaseModel):
+    content: str
     
 def get_cyber_herd_list():
     with shelve.open('cyber_herd_data.db') as shelf:
@@ -345,12 +414,9 @@ def update_cyber_herd_list(new_data: List[dict], reset=False):
         updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
         shelf['cyber_herd_list'] = updated_cyber_herd_list
 
-class Message(BaseModel):
-    content: str
-
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
     try:
-        response = await client.get('http://10.8.0.6:8080/rest/items/FeederOverride/state', headers=headers, auth=(ohauth1, ''))
+        response = await client.get(f'{openhab}/rest/items/FeederOverride/state', headers=headers, auth=(ohauth1, ''))
         return 200 <= response.status_code < 300 and response.text.strip() == 'ON'
     except httpx.RequestError as e:
         logger.error(f'An error occurred while checking feeder state: {e}')
@@ -361,19 +427,20 @@ async def should_trigger_feeder(balance: float, trigger: int) -> bool:
 
 async def trigger_feeder(client: httpx.AsyncClient):
     try:
-        response = await client.post('http://10.8.0.6:8080/rest/rules/88bd9ec4de/runnow', headers=headers, auth=(ohauth1, ''))
+        response = await client.post(f'{openhab}/rest/rules/88bd9ec4de/runnow', headers=headers, auth=(ohauth1, ''))
         return response.status_code == 200
     except httpx.RequestError as e:
         logger.error(f'Failed to trigger the feeder rule: {e}')
         return False
 
-async def send_payment():
+async def send_payment(withdraw=None):
     for retry in range(3):
-         # Convert to millisats, keep 10%
-        balance = await get_balance(client)
-        withdraw = int(round(balance * 0.98) / 1000)
+        if not withdraw:
+            # Convert to millisats, keep 10%
+            balance = await get_balance(client)
+            withdraw = int(round(balance * 0.98) / 1000)
+            
         memo = 'Reset Herd Wallet'
-
         payment_request = await create_invoice(client, withdraw, memo)
         payment_status = await pay_invoice(client, payment_request)
 
@@ -387,15 +454,6 @@ async def send_payment():
 async def webhook(data: HookData):
     # Debug output for payment data
     logger.debug(f"Received payment data: {data}")
-    
-    # Skip if payment has already been processed
-    if data.payment_hash in processed_payment_hashes:
-        logger.info(f'Payment with hash {data.payment_hash} already processed, skipping...')
-        return 'payment_already_processed'
-
-    # Add the payment hash to the set and schedule its removal klunk work around for lnbits bug
-    processed_payment_hashes.add(data.payment_hash)
-    asyncio.create_task(remove_payment_hash_after_delay(data.payment_hash, 5))
         
     if await is_feeder_on(client):
         logger.info('Feeder off, skipping...')
@@ -403,8 +461,8 @@ async def webhook(data: HookData):
     
     description = data.description
     amount = int(data.amount / 1000) if data.amount else 0
-    balance = int(await get_balance(client)) / 1000
-    trigger = await update_and_get_trigger_amount(client)
+    balance = int(await get_balance(client, True)) / 1000
+    trigger = await update_and_get_trigger_amount(client, True)
     cyber_herd_list = get_cyber_herd_list()
     cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
     num_members = len(cyber_herd_dict)
@@ -412,7 +470,7 @@ async def webhook(data: HookData):
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
             if num_members > 0:
-                random_factor = random.uniform(0.2, 0.5)
+                random_factor = random.uniform(0.2, 0.4)
                 payment_per_member = math.floor(((trigger * 1000) * random_factor) / num_members)
                 payment_per_member = (payment_per_member // 1000) * 1000
                 treats = int(payment_per_member / 1000)
@@ -424,10 +482,9 @@ async def webhook(data: HookData):
                             
                             if kind == "6":
                                 payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 6 Cyber Herd Treats')
-                            if kind == "7" or kind is None:
-                                payment_per_member7 = payment_per_member * .1
-                                payment_per_member7 = math.floor(payment_per_member7)
-                                payment_response = await make_lnurl_payment(lud16, payment_per_member7, 'Kind 7 Cyber Herd Treats')
+                                
+                            if kind == "7":
+                                payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 7 Cyber Herd Treats')
                                 
                             if 'payment_hash' in payment_response:
                                 item['payouts'] += treats
@@ -440,8 +497,6 @@ async def webhook(data: HookData):
                             print(f"An error occurred during payment for {lud16}: {e}")
                             continue  # Skip the rest of the loop for this record
 
-                        await asyncio.sleep(.01)  # wait a little before the next payment
-
             status = await send_payment()  # reset herd wallet
             
             if status == 201:
@@ -450,7 +505,7 @@ async def webhook(data: HookData):
 
     else:
         difference = round(trigger - float(balance))
-        if amount >= float(await convert_to_sats(client, 0.01)):  # only send nostr notifications of a cent or more to reduce spamming
+        if amount >= float(await convert_to_sats(client, 0.01, True)):  # only send nostr notifications of a cent or more to reduce spamming
             message = await messaging.make_messages(nos_sec, amount, difference, "sats_received")
             update_message_in_db(message)
             return "received"
@@ -464,6 +519,18 @@ async def balance():
     else:
         logger.error("Failed to retrieve balance")
         raise HTTPException(status_code=400, detail="Failed to retrieve balance")
+
+@app.post("/create-invoice/")
+async def create_invoice_route(invoice_request: InvoiceRequest):
+    async with httpx.AsyncClient() as client:
+        # Use provided key if available, otherwise default to herd_key
+        key = invoice_request.key if invoice_request.key else herd_key
+        payment_request = await create_invoice(client, invoice_request.amount, invoice_request.memo, key)
+        
+        if payment_request:
+            return {"payment_request": payment_request}
+        else:
+            raise HTTPException(status_code=400, detail="Failed to create invoice or payment request not found.")
 
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData]):
@@ -493,8 +560,8 @@ async def update_cyber_herd(data: List[CyberHerdData]):
             update_message_in_db(message)
             cyber_herd_dict[pubkey]['notified'] = messaging.notified.get('id')
 
-    # Update the list from the dictionary and trim to the last 10 records
-    updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+    # Update the list from the dictionary and trim to the last 20 records
+    updated_cyber_herd_list = list(cyber_herd_dict.values())[-20:]
 
     # Update the cyber herd list in the database
     update_cyber_herd_list(updated_cyber_herd_list)
