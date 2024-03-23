@@ -35,7 +35,7 @@ openhab ='http://10.8.0.6:8080'
 load_dotenv()
 
 # List all the environment variables that your application depends on
-required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC']
+required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 validate_env_vars(required_env_vars)
 
 ohauth1 = os.getenv('OH_AUTH_1')
@@ -44,6 +44,7 @@ herd_key = os.getenv('HERD_KEY')
 sat_key = os.getenv('SAT_KEY')
 google_api_key = os.getenv('GOOGLE_API_KEY')
 nos_sec = os.getenv('NOS_SEC')
+cyberherd_key = os.getenv('CYBERHERD_KEY')
 
 cyber_herd_list = []
 message_list = []
@@ -232,53 +233,8 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float, force_refres
         logger.error(f'Failed to convert amount: {e}')
 
     return cached_conversion  # Return the cached conversion rate if the request fails
-async def make_lnurl_payment(lud16: str, amount: int, description: str = None, key: str = herd_key) -> dict:
-    try:
-        # Define the headers for the request
-        headers = {
-            "accept": "application/json",
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
 
-        # Fetch lnurl data directly from the API
-        lnurl_url = f'{lnbits}/api/v1/lnurlscan/{lud16}'
-        lnurl_response = await client.get(lnurl_url, headers=headers)
-        lnurl_response.raise_for_status()
-        lnurl_data = lnurl_response.json()
-        
-        #if lnurl_data["allowsNostr"] == True and lnurl_data["nostrPubkey"]:
-        #todo: get lnurl
-        #todo: construct and sign nostr event
-            #payment_response = await client.get(lnurl_data["callback"], amount=amount, nostr=nostr, lnurl-lnurl) #?amount=${amount}&nostr=${event}&lnurl=${lnurl}`        
-        #else:
-        # Prepare the payload for the payment request
-        payload = {
-            "description_hash": lnurl_data["description_hash"],
-            "callback": lnurl_data["callback"],
-            "amount": amount,
-            "comment": "Cyber Herd Treats",
-            "memo": description if description is not None else "Cyber Herd Treats",
-            "description": description if description is not None else "Cyber Herd Treats"
-        }
-        
-        payment_url = f'{lnbits}/api/v1/payments/lnurl'
-        payment_response = await client.post(payment_url, headers=headers, json=payload)
-           
-        payment_response.raise_for_status()
-        return payment_response.json()
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP request failed with status code: {e.response.status_code}, response: {e.response.text}")
-        raise
-    except httpx.RequestError as e:
-        logger.error(f"HTTP request failed: {e}")
-        raise
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        raise
-
-async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
+async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = cyberherd_key): # key is to wallet
     try:
         url = f'{lnbits}/api/v1/payments'
 
@@ -363,7 +319,7 @@ def update_message_in_db(new_message=None):
         message_list.append(formatted_message)
 
         # If the number of messages exceeds 3, remove the oldest one
-        while len(message_list) > 3:
+        while len(message_list) > 5:
             message_list.pop(0)  # Remove the first (oldest) message
 
 class HookData(BaseModel):
@@ -389,6 +345,82 @@ class InvoiceRequest(BaseModel):
 class Message(BaseModel):
     content: str
     
+
+async def fetch_cyberherd_targets(client: httpx.AsyncClient):
+    url = f'{lnbits}/splitpayments/api/v1/targets'
+    headers = {
+        'accept': 'application/json',
+        'X-API-KEY': cyberherd_key  # Use the cyberherd_key from the environment variables
+    }
+    response = await client.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return {'error': 'Request failed with status code {}'.format(response.status_code)}
+
+async def create_cyberherd_targets(client: httpx.AsyncClient, new_targets_data, initial_targets):
+    fetched_wallets = {item['wallet']: item for item in initial_targets}
+    
+    # Predefined wallet
+    predefined_wallet = {'wallet': 'sat@bolverker.com', 'alias': 'Sat', 'percent': 80}
+    
+    # Initialize combined_wallets with any wallet not the predefined, to avoid duplication
+    combined_wallets = []
+    
+    for item in new_targets_data:
+        wallet = item['wallet']
+        name = item.get('alias', 'Unknown')
+        if wallet not in fetched_wallets and wallet != predefined_wallet['wallet']:
+            combined_wallets.append({'wallet': wallet, 'alias': name})
+    
+    # Add fetched wallets, excluding the predefined one to avoid duplication
+    for wallet, details in fetched_wallets.items():
+        if wallet != predefined_wallet['wallet']:
+            combined_wallets.append({'wallet': wallet, 'alias': details.get('alias', 'Unknown')})
+    
+    # Ensure total percent allocation does not exceed 100%
+    total_percent_allocation = predefined_wallet['percent']
+    targets_list = [predefined_wallet]
+    
+    # Determine allocation for new wallets
+    if combined_wallets:
+        percent_per_wallet = (100 - total_percent_allocation) // len(combined_wallets)
+        for wallet in combined_wallets:
+            targets_list.append({
+                'wallet': wallet['wallet'], 
+                'alias': wallet['alias'], 
+                'percent': percent_per_wallet
+            })
+            total_percent_allocation += percent_per_wallet
+    
+    # If the total allocation is less than 100, adjust the last added wallet's percent
+    if total_percent_allocation < 100 and targets_list:
+        last_wallet = targets_list[-1]
+        last_wallet['percent'] += (100 - total_percent_allocation)
+    
+    # Construct the final targets structure
+    targets = {"targets": targets_list}
+    
+    return targets
+
+
+async def update_cyberherd_targets(client: httpx.AsyncClient, targets):
+    url = f'{lnbits}/splitpayments/api/v1/targets'
+    headers = {
+        'accept': 'application/json',
+        'X-API-KEY': cyberherd_key,  # Use the cyberherd_key from the environment variables
+        'Content-Type': 'application/json'
+    }
+    
+    data = json.dumps(targets)
+    
+    response = await client.put(url, headers=headers, content=data)
+    
+    if response.status_code == 200:
+        print("Success:", response.json())
+    else:
+        print("Error:", response.text)
+        
 def get_cyber_herd_list():
     with shelve.open('cyber_herd_data.db') as shelf:
         return shelf.get('cyber_herd_list', [])
@@ -433,15 +465,12 @@ async def trigger_feeder(client: httpx.AsyncClient):
         logger.error(f'Failed to trigger the feeder rule: {e}')
         return False
 
-async def send_payment(withdraw=None):
+async def send_payment(balance):
+    withdraw = int(round(balance * 0.98))        
+    memo = 'Reset Herd Wallet'
+    payment_request = await create_invoice(client, withdraw, memo)
+    
     for retry in range(3):
-        if not withdraw:
-            # Convert to millisats, keep 10%
-            balance = await get_balance(client)
-            withdraw = int(round(balance * 0.98) / 1000)
-            
-        memo = 'Reset Herd Wallet'
-        payment_request = await create_invoice(client, withdraw, memo)
         payment_status = await pay_invoice(client, payment_request)
 
         if payment_status == 201:
@@ -463,41 +492,10 @@ async def webhook(data: HookData):
     amount = int(data.amount / 1000) if data.amount else 0
     balance = int(await get_balance(client, True)) / 1000
     trigger = await update_and_get_trigger_amount(client, True)
-    cyber_herd_list = get_cyber_herd_list()
-    cyber_herd_dict = {item['lud16']: item for item in cyber_herd_list}
-    num_members = len(cyber_herd_dict)
     
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
-            if num_members > 0:
-                random_factor = random.uniform(0.2, 0.4)
-                payment_per_member = math.floor(((trigger * 1000) * random_factor) / num_members)
-                payment_per_member = (payment_per_member // 1000) * 1000
-                treats = int(payment_per_member / 1000)
-            
-                for lud16, item in cyber_herd_dict.items():
-                    if lud16 is not None:
-                        try:
-                            kind = item.get('kind')
-                            
-                            if kind == "6":
-                                payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 6 Cyber Herd Treats')
-                                
-                            if kind == "7":
-                                payment_response = await make_lnurl_payment(lud16, payment_per_member, 'Kind 7 Cyber Herd Treats')
-                                
-                            if 'payment_hash' in payment_response:
-                                item['payouts'] += treats
-                                message = await messaging.make_messages(nos_sec, treats, 0, "cyber_herd_treats", cyber_herd_dict[lud16])
-                                update_message_in_db(message)
-                                update_cyber_herd_list(list(cyber_herd_dict.values()))
-
-                        except Exception as e:
-                            # Handle any exceptions that occur during the payment
-                            print(f"An error occurred during payment for {lud16}: {e}")
-                            continue  # Skip the rest of the loop for this record
-
-            status = await send_payment()  # reset herd wallet
+            status = await send_payment(balance)  # reset herd wallet
             
             if status == 201:
                 message = await messaging.make_messages(nos_sec, amount, 0, "feeder_triggered")
@@ -509,6 +507,7 @@ async def webhook(data: HookData):
             message = await messaging.make_messages(nos_sec, amount, difference, "sats_received")
             update_message_in_db(message)
             return "received"
+            
     return 'payment_processed'
 
 @app.get("/balance")
@@ -534,39 +533,52 @@ async def create_invoice_route(invoice_request: InvoiceRequest):
 
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData]):
-    # Retrieve the current cyber herd list from the shelve database
     cyber_herd_list = get_cyber_herd_list()
 
     balance = float(await get_balance(client)) / 1000
     trigger = await update_and_get_trigger_amount(client)
-    difference = round(trigger - float(balance))
+    difference = round(trigger - balance)
 
-    # Create a dictionary for quick lookup using pubkey
+    # Fetch initial cyberherd targets to initialize
+    initial_targets = await fetch_cyberherd_targets(client)
+    existing_wallets = {item['wallet']: item for item in initial_targets}
+
     cyber_herd_dict = {item['pubkey']: item for item in cyber_herd_list}
+    targets_to_create = []
 
-    # Append new items to the list
     for item in data:
         item_dict = item.dict()
         pubkey = item_dict['pubkey']
-
-        # If pubkey not in cyber_herd_dict, add it with notified set to None
+        
         if pubkey not in cyber_herd_dict:
             cyber_herd_dict[pubkey] = item_dict
             cyber_herd_dict[pubkey]['notified'] = None
+        
+            if item_dict['lud16'] not in existing_wallets:
+                targets_to_create.append({
+                    'wallet': item_dict['lud16'],  # Use lud16 as wallet
+                    'alias': item_dict['pubkey'],  # set pubkey as alias
+                    # 'percent' will be determined later
+                })
 
+    if targets_to_create:
+        targets = await create_cyberherd_targets(client, targets_to_create, initial_targets)
+        if targets:
+            await update_cyberherd_targets(client, targets)
+    for item in data:
+        item_dict = item.dict()
+        pubkey = item_dict['pubkey']
         # Check if 'notified' is None or empty, indicating notification has not been sent
         if not cyber_herd_dict[pubkey].get('notified'):
             message = await messaging.make_messages(nos_sec, 0, difference, "cyber_herd", item_dict)
             update_message_in_db(message)
             cyber_herd_dict[pubkey]['notified'] = messaging.notified.get('id')
 
-    # Update the list from the dictionary and trim to the last 20 records
-    updated_cyber_herd_list = list(cyber_herd_dict.values())[-20:]
-
-    # Update the cyber herd list in the database
+    updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
     update_cyber_herd_list(updated_cyber_herd_list)
 
     return {"status": "success"}
+
 
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
@@ -574,7 +586,27 @@ async def get_cyber_herd():
 
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
+    # Reset the cyber herd list in the database
     update_cyber_herd_list([], reset=True)
+
+    headers = {
+        'accept': 'application/json',
+        'X-API-KEY': cyberherd_key  # Use the API key securely
+    }
+    url = f'{lnbits}/splitpayments/api/v1/targets?api-key={cyberherd_key}'
+
+    try:
+        response = await client.delete(url, headers=headers)
+        if response.status_code == 200:
+            # Handle successful response
+            return {"status": "success", "message": "CyberHerd reset successfully."}
+        else:
+            # Handle non-successful responses
+            return {"status": "error", "message": f"Failed to reset CyberHerd, status code: {response.status_code}"}
+    except httpx.RequestError as e:
+        # Log and handle request errors
+        logger.error(f"Request failed: {e}")
+        return {"status": "error", "message": "Request to API failed."}
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
