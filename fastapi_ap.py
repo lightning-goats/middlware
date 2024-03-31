@@ -106,7 +106,7 @@ app = FastAPI()
 client = httpx.AsyncClient()
 
 def convert_to_dict(message_data):
-    # If the message_data is just a string, we'll assume it's the content of the message
+    # If the message_data is just a string, assume it's the content of the message
     if isinstance(message_data, str):
         return {"content": message_data}
     
@@ -117,7 +117,7 @@ def convert_to_dict(message_data):
 def get_trigger_amount():
     return trigger_amount_cache['trigger_amount']
 
-async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.0, force_refresh=False):
+async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.25, force_refresh=False):
     current_time = time.time()
     cached_trigger_amount = trigger_amount_cache['trigger_amount']
     expires_at = trigger_amount_cache['expires_at']
@@ -129,9 +129,8 @@ async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd
     try:
         sats = await convert_to_sats(client, amount_in_usd)
         if sats is not None and sats != 0:
-            # Update the cache with the new trigger amount and set an expiration time (e.g., 60 seconds)
             trigger_amount_cache['trigger_amount'] = sats
-            trigger_amount_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
+            trigger_amount_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
             return sats
         else:
             return get_trigger_amount()
@@ -189,9 +188,8 @@ async def get_balance(client: httpx.AsyncClient, force_refresh=False):
         if response.status_code == 200:
             balance = response.json().get('balance')
             if balance is not None:
-                # Update the cache with the new balance and set an expiration time (e.g., 60 seconds)
                 balance_cache['balance'] = balance
-                balance_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
+                balance_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
                 return balance
             else:
                 return cached_balance  # Return the cached balance if the new balance is None
@@ -221,9 +219,8 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float, force_refres
         if response.status_code == 200:
             sats = response.json()['sats']
             if sats is not None:
-                # Update the cache with the new conversion rate and set an expiration time (e.g., 60 seconds)
                 conversion_cache['usd_to_sats'][amount] = sats
-                conversion_cache['expires_at'] = current_time + 60  # Cache expires in 60 seconds
+                conversion_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
                 return sats
             else:
                 return cached_conversion  # Return the cached conversion rate if the new rate is None
@@ -246,7 +243,6 @@ async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key:
 
         data = {
             "unit": "sat",
-            "internal": False,
             "out": False,
             "amount": amount,
             "memo": memo,
@@ -282,7 +278,6 @@ async def pay_invoice(client: httpx.AsyncClient, payment_request: str, key: str 
 
         data = {
             "unit": "sat",
-            "internal": True,
             "out": True,
             "bolt11": payment_request
         }
@@ -294,7 +289,7 @@ async def pay_invoice(client: httpx.AsyncClient, payment_request: str, key: str 
             return 201
         else:
             logger.error(f'Failed to pay invoice, status code: {response.status_code}')
-            return None
+            return response.status_code
     except httpx.RequestError as e:
         logger.error(f'Failed to pay invoice: {e}')
         return None
@@ -336,6 +331,10 @@ class CyberHerdData(BaseModel):
     lud16: str
     notified: str = None
     payouts: int = 0
+    
+class CyberHerdTreats(BaseModel):
+    pubkey: str
+    amount: int
     
 class InvoiceRequest(BaseModel):
     amount: int
@@ -382,7 +381,7 @@ async def create_cyberherd_targets(client: httpx.AsyncClient, new_targets_data, 
     total_percent_allocation = predefined_wallet['percent']
     targets_list = [predefined_wallet]
     
-    # Determine allocation for new wallets
+    # Determine allocation for cyberherd splits
     if combined_wallets:
         percent_per_wallet = (100 - total_percent_allocation) // len(combined_wallets)
         for wallet in combined_wallets:
@@ -408,7 +407,7 @@ async def update_cyberherd_targets(client: httpx.AsyncClient, targets):
     url = f'{lnbits}/splitpayments/api/v1/targets'
     headers = {
         'accept': 'application/json',
-        'X-API-KEY': cyberherd_key,  # Use the cyberherd_key from the environment variables
+        'X-API-KEY': cyberherd_key, 
         'Content-Type': 'application/json'
     }
     
@@ -443,7 +442,7 @@ def update_cyber_herd_list(new_data: List[dict], reset=False):
             pubkey = new_item_dict['pubkey']
             cyber_herd_dict[pubkey] = new_item_dict  # Update or add the new item
 
-        updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+        updated_cyber_herd_list = list(cyber_herd_dict.values())[-5:]
         shelf['cyber_herd_list'] = updated_cyber_herd_list
 
 async def is_feeder_on(client: httpx.AsyncClient) -> bool:
@@ -466,7 +465,7 @@ async def trigger_feeder(client: httpx.AsyncClient):
         return False
 
 async def send_payment(balance):
-    withdraw = int(round(balance * 0.98))        
+    withdraw = int(balance) * 0.99        
     memo = 'Reset Herd Wallet'
     payment_request = await create_invoice(client, withdraw, memo)
     
@@ -490,7 +489,7 @@ async def webhook(data: HookData):
     
     description = data.description
     amount = int(data.amount / 1000) if data.amount else 0
-    balance = int(await get_balance(client, True)) / 1000
+    balance = round(int(await get_balance(client, True)) / 1000)
     trigger = await update_and_get_trigger_amount(client, True)
     
     if await should_trigger_feeder(balance, trigger):
@@ -654,6 +653,23 @@ async def get_messages():
         logger.error(f"Error in /messages route: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/messages/cyberherd_treats")
+async def handle_cyberherd_treats(data: CyberHerdTreats):
+    try:
+        pubkey = data.pubkey
+        amount = data.amount
+        cyber_herd_dict = {item['pubkey']: item for item in get_cyber_herd_list()}
+
+        if pubkey in cyber_herd_dict:
+            message_data = await messaging.make_messages(nos_sec, amount, 0, "cyber_herd_treats", cyber_herd_dict[pubkey])
+            update_message_in_db(message_data)
+            return {"status": "success"}
+        else:
+            return {"status": "error", "message": "Invalid pubkey"}
+    except Exception as e:
+        logger.error(f"Error in /messages/cyberherd_treats route: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
 @app.get("/messages/info")
 async def create_info_message():
     global message_list
