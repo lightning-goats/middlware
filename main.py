@@ -4,19 +4,17 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from googleapiclient.discovery import build
 from urllib.parse import quote
-from ecdsa import SigningKey, SECP256k1
 from datetime import datetime
 from env_utils import load_environment_variables
 from db_utils import set_trigger_amount, get_trigger_amount, get_cyber_herd_list, update_cyber_herd_list
+from event_utils import serialize_event, remove_id_and_sig, compute_event_hash, sign_event_hash, update_event_with_id_and_sig, sign_event
 import messaging
 import asyncio
 import httpx
-import json
 import os
 import logging
 import math
 import random
-import hashlib
 import base64
 import time
 
