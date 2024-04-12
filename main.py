@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -7,9 +7,9 @@ from urllib.parse import quote
 from ecdsa import SigningKey, SECP256k1
 from datetime import datetime
 from env_utils import load_environment_variables
+from db_utils import set_trigger_amount, get_trigger_amount, get_cyber_herd_list, update_cyber_herd_list
 import messaging
 import asyncio
-import shelve
 import httpx
 import json
 import os
