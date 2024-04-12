@@ -8,6 +8,7 @@ from datetime import datetime
 from env_utils import load_environment_variables
 from db_utils import set_trigger_amount, get_trigger_amount, get_cyber_herd_list, update_cyber_herd_list
 from event_utils import serialize_event, remove_id_and_sig, compute_event_hash, sign_event_hash, update_event_with_id_and_sig, sign_event
+from payment_utils import make_lnurl_payment, create_invoice, pay_invoice, send_payment
 import messaging
 import asyncio
 import httpx
@@ -182,132 +183,6 @@ async def process_lud16(lud16: str, item: dict, treats: int, cyber_herd_dict: di
         # Handle any exceptions that occur during the payment
         logger.error(f"An error occurred during payment for {lud16}: {e}")
         raise  # Raise the exception to ensure it's logged and handled elsewhere
-
-async def make_lnurl_payment(lud16: str, amount: int, description: str = None, key: str = herd_key) -> dict:
-    try:
-        headers = {
-            "accept": "application/json",
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
-
-        lnurl_url = f"https://lnb.bolverker.com/api/v1/lnurlscan/{lud16}"
-        lnurl_response = await client.get(lnurl_url, headers=headers)
-        lnurl_response.raise_for_status()
-        lnurl_data = lnurl_response.json()
-
-        if not (lnurl_data['minSendable'] <= abs(amount) <= lnurl_data['maxSendable']):
-            logger.error(f"{lud16}: amount {amount} is out of bounds (min: {lnurl_data['minSendable']}, max: {lnurl_data['maxSendable']})")
-            return None
-
-        payload = {
-            "description_hash": lnurl_data["description_hash"],
-            "callback": lnurl_data["callback"],
-            "amount": amount,
-            "comment": "Cyber Herd Treats",
-            "memo": description if description is not None else "Cyber Herd Treats",
-            "description": description if description is not None else "Cyber Herd Treats"
-        }
-
-        if lnurl_data["allowsNostr"] and lnurl_data["nostrPubkey"]:
-            relays = ['wss://nostr-pub.wellorder.net', 'wss://relay.damus.io', 'wss://relay.primal.net']
-            event_details = {
-                "kind": 9734,
-                "content": description if description is not None else "Cyber Herd Treats",
-                "created_at": round(time.time()),
-                "tags": [
-                    ["relays", *relays],
-                    ["amount", str(amount)],
-                    ["p", lnurl_data["nostrPubkey"]]
-                ],
-                "pubkey": "669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6"
-            }
-            signed_event = await sign_event(event_details, nos_sec)
-            payload["nostr"] = json.dumps(signed_event)
-            logger.info(f"{signed_event}")
-            
-        payment_url = "https://lnb.bolverker.com/api/v1/payments/lnurl"
-        response = await client.post(payment_url, headers=headers, json=payload)
-        response.raise_for_status()
-
-        return response.json()
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP request failed with status code: {e.response.status_code}, response: {e.response.text}")
-        return None
-
-    except httpx.RequestError as e:
-        logger.error(f"HTTP request failed: {e}")
-        return None
-
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        return None
-        
-async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = sat_key): # key is to wallet
-    try:
-        url = "https://lnb.bolverker.com/api/v1/payments"
-
-        headers = {
-            "accept": "application/json",
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "unit": "sat",
-            "internal": False,
-            "out": False,
-            "amount": amount,
-            "memo": memo,
-        }
-
-        response = await client.post(url, json=data, headers=headers)
-        
-        if response.status_code == 201:
-            response_data = response.json()
-            payment_request = response_data.get("payment_request")
-            if payment_request:
-                logger.info('Invoice created successfully.')
-                return payment_request
-            else:
-                logger.error('Payment request not found in the response.')
-                return None
-        else:
-            logger.error(f'Failed to create invoice, status code: {response.status_code}')
-            return None
-    except httpx.RequestError as e:
-        logger.error(f'Failed to create invoice: {e}')
-        return None
-        
-async def pay_invoice(client: httpx.AsyncClient, payment_request: str, key: str = herd_key):  # key is from wallet
-    try:
-        url = "https://lnb.bolverker.com/api/v1/payments"
-
-        headers = {
-            "accept": "application/json",
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "unit": "sat",
-            "internal": True,
-            "out": True,
-            "bolt11": payment_request
-        }
-
-        response = await client.post(url, json=data, headers=headers)
-        
-        if response.status_code == 201:
-            logger.info('Invoice payment successful.')
-            return 201
-        else:
-            logger.error(f'Failed to pay invoice, status code: {response.status_code}')
-            return None
-    except httpx.RequestError as e:
-        logger.error(f'Failed to pay invoice: {e}')
-        return None
 
 async def remove_payment_hash_after_delay(payment_hash: str, delay: int):
     await asyncio.sleep(delay)
