@@ -18,6 +18,8 @@ import math
 import os
 import random
 import time
+import hashlib
+from ecdsa import SigningKey, SECP256k1
 
 def validate_env_vars(required_vars):
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -35,11 +37,10 @@ openhab ='http://10.8.0.6:8080'
 load_dotenv()
 
 # List all the environment variables that your application depends on
-required_env_vars = ['OH_AUTH_1', 'API_KEY', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
+required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 validate_env_vars(required_env_vars)
 
 ohauth1 = os.getenv('OH_AUTH_1')
-api_key = os.getenv('API_KEY')
 herd_key = os.getenv('HERD_KEY')
 sat_key = os.getenv('SAT_KEY')
 google_api_key = os.getenv('GOOGLE_API_KEY')
@@ -105,6 +106,40 @@ else:
 app = FastAPI()
 client = httpx.AsyncClient()
 
+def remove_id_and_sig(event: dict) -> dict:
+    return {k: v for k, v in event.items() if k not in ['id', 'sig']}
+
+def serialize_event(event: dict) -> bytes:
+    return json.dumps([
+        0,
+        event['pubkey'],
+        event['created_at'],
+        event['kind'],
+        event.get('tags', []),
+        event.get('content', '')
+    ], separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+
+def compute_event_hash(serialized_event: bytes) -> bytes:
+    return hashlib.sha256(serialized_event).digest()
+
+def sign_event_hash(event_hash: bytes, private_key_hex: str) -> str:
+    sk = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
+    signature = sk.sign_deterministic(event_hash)
+    return signature.hex()
+
+def update_event_with_id_and_sig(event: dict, event_hash: bytes, signature_hex: str) -> dict:
+    event['id'] = event_hash.hex()
+    event['sig'] = signature_hex
+    return event
+
+async def sign_event(event: dict, private_key_hex: str) -> dict:
+    event_to_sign = remove_id_and_sig(event)
+    serialized_event = serialize_event(event_to_sign)
+    event_hash = compute_event_hash(serialized_event)
+    signature_hex = sign_event_hash(event_hash, private_key_hex)
+    signed_event = update_event_with_id_and_sig(event, event_hash, signature_hex)
+    return signed_event
+    
 def convert_to_dict(message_data):
     # If the message_data is just a string, assume it's the content of the message
     if isinstance(message_data, str):
@@ -117,7 +152,7 @@ def convert_to_dict(message_data):
 def get_trigger_amount():
     return trigger_amount_cache['trigger_amount']
 
-async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 1.25, force_refresh=False):
+async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd: float = 0.50, force_refresh=False):
     current_time = time.time()
     cached_trigger_amount = trigger_amount_cache['trigger_amount']
     expires_at = trigger_amount_cache['expires_at']
@@ -130,7 +165,7 @@ async def update_and_get_trigger_amount(client: httpx.AsyncClient, amount_in_usd
         sats = await convert_to_sats(client, amount_in_usd)
         if sats is not None and sats != 0:
             trigger_amount_cache['trigger_amount'] = sats
-            trigger_amount_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
+            trigger_amount_cache['expires_at'] = current_time + 15  # Cache expires in 15 seconds
             return sats
         else:
             return get_trigger_amount()
@@ -184,12 +219,12 @@ async def get_balance(client: httpx.AsyncClient, force_refresh=False):
         return cached_balance
 
     try:
-        response = await client.get(F'{lnbits}/api/v1/wallet', headers={'X-Api-Key': api_key})
+        response = await client.get(F'{lnbits}/api/v1/wallet', headers={'X-Api-Key': herd_key})
         if response.status_code == 200:
             balance = response.json().get('balance')
             if balance is not None:
                 balance_cache['balance'] = balance
-                balance_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
+                balance_cache['expires_at'] = current_time + 15  # Cache expires in 15 seconds
                 return balance
             else:
                 return cached_balance  # Return the cached balance if the new balance is None
@@ -220,7 +255,7 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float, force_refres
             sats = response.json()['sats']
             if sats is not None:
                 conversion_cache['usd_to_sats'][amount] = sats
-                conversion_cache['expires_at'] = current_time + 300  # Cache expires in 300 seconds
+                conversion_cache['expires_at'] = current_time + 15  # Cache expires in 15 seconds
                 return sats
             else:
                 return cached_conversion  # Return the cached conversion rate if the new rate is None
@@ -231,7 +266,67 @@ async def convert_to_sats(client: httpx.AsyncClient, amount: float, force_refres
 
     return cached_conversion  # Return the cached conversion rate if the request fails
 
-async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = cyberherd_key): # key is to wallet
+async def make_lnurl_payment(lud16: str, amount: int, description: str = None, key: str = herd_key) -> dict:
+    try:
+        headers = {
+            "accept": "application/json",
+            "X-API-KEY": key,
+            "Content-Type": "application/json"
+        }
+
+        lnurl_url = f"{lnbits}/api/v1/lnurlscan/{lud16}"
+        lnurl_response = await client.get(lnurl_url, headers=headers)
+        lnurl_response.raise_for_status()
+        lnurl_data = lnurl_response.json()
+        
+        if not (lnurl_data['minSendable'] <= abs(amount) <= lnurl_data['maxSendable']):
+            logger.error(f"{lud16}: amount {amount} is out of bounds (min: {lnurl_data['minSendable']}, max: {lnurl_data['maxSendable']})")
+            return None
+
+        if lnurl_data["allowsNostr"] and lnurl_data["nostrPubkey"]:
+            relays = ['wss://nostr-pub.wellorder.net', 'wss://relay.damus.io', 'wss://relay.primal.net']
+        
+            event = {
+                "kind": 9734,
+                "content": description if description is not None else "Cyber Herd Treats",
+                "created_at": round(time.time()),
+                "tags": [
+                    ["relays", *relays],
+                    ["amount", str(amount)],
+                    ["p", lnurl_data["nostrPubkey"]]
+                ],
+                "pubkey": "2c635dd7af944eee89eb8b18a62b714e654056b6c2654d6c2aa8b3400d625d52"
+            }
+            
+            signed_event = await sign_event(event, nos_sec)
+            payload["nostr"] = json.dumps(signed_event)
+        
+        payload = {
+            "description_hash": lnurl_data["description_hash"],
+            "callback": lnurl_data["callback"],
+            "amount": amount,
+            "comment": "Cyber Herd Treats",
+            "memo": description if description is not None else "Cyber Herd Treats",
+            "description": description if description is not None else "Cyber Herd Treats"
+        }
+        
+        payment_url = "https://lnb.bolverker.com/api/v1/payments/lnurl"
+        response = await client.post(payment_url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP request failed with status code: {e.response.status_code}, response: {e.response.text}")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"HTTP request failed: {e}")
+        return None
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return None
+
+
+async def create_invoice(client: httpx.AsyncClient, amount: int, memo: str, key: str = cyberherd_key): # key is the to wallet
     try:
         url = f'{lnbits}/api/v1/payments'
 
@@ -344,7 +439,6 @@ class InvoiceRequest(BaseModel):
 class Message(BaseModel):
     content: str
     
-
 async def fetch_cyberherd_targets(client: httpx.AsyncClient):
     url = f'{lnbits}/splitpayments/api/v1/targets'
     headers = {
@@ -361,7 +455,7 @@ async def create_cyberherd_targets(client: httpx.AsyncClient, new_targets_data, 
     fetched_wallets = {item['wallet']: item for item in initial_targets}
     
     # Predefined wallet
-    predefined_wallet = {'wallet': 'sat@bolverker.com', 'alias': 'Sat', 'percent': 80}
+    predefined_wallet = {'wallet': 'bolverker@strike.me', 'alias': 'Sat', 'percent': 80}
     
     # Initialize combined_wallets with any wallet not the predefined, to avoid duplication
     combined_wallets = []
@@ -454,7 +548,7 @@ async def is_feeder_on(client: httpx.AsyncClient) -> bool:
         return False
 
 async def should_trigger_feeder(balance: float, trigger: int) -> bool:
-    return balance >= (trigger - 25)
+    return balance >= (trigger - 35)
 
 async def trigger_feeder(client: httpx.AsyncClient):
     try:
@@ -494,15 +588,15 @@ async def webhook(data: HookData):
     
     if await should_trigger_feeder(balance, trigger):
         if await trigger_feeder(client):
-            status = await send_payment(balance)  # reset herd wallet
+            status = await send_payment(balance)  # reset herd wallet 
             
-            if status == 201:
+            if status:
                 message = await messaging.make_messages(nos_sec, amount, 0, "feeder_triggered")
                 update_message_in_db(message)
 
     else:
         difference = round(trigger - float(balance))
-        if amount >= float(await convert_to_sats(client, 0.01, True)):  # only send nostr notifications of a cent or more to reduce spamming
+        if amount >= float(await convert_to_sats(client, 0.01, True)):  # only send nostr notifications for a cent or more to reduce spamming
             message = await messaging.make_messages(nos_sec, amount, difference, "sats_received")
             update_message_in_db(message)
             return "received"
@@ -533,7 +627,7 @@ async def create_invoice_route(invoice_request: InvoiceRequest):
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData]):
     cyber_herd_list = get_cyber_herd_list()
-
+    updated_cyber_herd_list = []
     balance = float(await get_balance(client)) / 1000
     trigger = await update_and_get_trigger_amount(client)
     difference = round(trigger - balance)
@@ -560,20 +654,25 @@ async def update_cyber_herd(data: List[CyberHerdData]):
                     # 'percent' will be determined later
                 })
 
-    if targets_to_create:
+    if targets_to_create: #// add to cyberherd splits extension
         targets = await create_cyberherd_targets(client, targets_to_create, initial_targets)
         if targets:
             await update_cyberherd_targets(client, targets)
+            
     for item in data:
         item_dict = item.dict()
         pubkey = item_dict['pubkey']
+        
         # Check if 'notified' is None or empty, indicating notification has not been sent
-        if not cyber_herd_dict[pubkey].get('notified'):
+        if cyber_herd_dict[pubkey].get('notified') is None or cyber_herd_dict[pubkey].get('notified').strip() == "":
             message = await messaging.make_messages(nos_sec, 0, difference, "cyber_herd", item_dict)
             update_message_in_db(message)
             cyber_herd_dict[pubkey]['notified'] = messaging.notified.get('id')
-
+        
+    # Update the list from the dictionary and trim to the last 10 records
     updated_cyber_herd_list = list(cyber_herd_dict.values())[-10:]
+
+    # Update the cyber herd list in the database
     update_cyber_herd_list(updated_cyber_herd_list)
 
     return {"status": "success"}
