@@ -18,6 +18,7 @@ import math
 import random
 import time
 from databases import Database
+import websockets
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 # FastAPI app setup
 app = FastAPI()
+
+# Globals
+balance = None  # Global variable for balance
+trigger_amount = None  # Global variable for trigger amount
 
 # Pydantic models
 class HookData(BaseModel):
@@ -60,7 +65,7 @@ class InvoiceRequest(BaseModel):
 class Message(BaseModel):
     content: str
 
-# 1. Environment and Configuration
+# Environment and Configuration
 def load_env_vars(required_vars):
     load_dotenv()
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -68,13 +73,14 @@ def load_env_vars(required_vars):
         raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
     return {var: os.getenv(var) for var in required_vars}
 
-# Configuration
 required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 config = load_env_vars(required_env_vars)
 
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
+HERD_WEBSOCKET = "wss://lnb.bolverker.com/api/v1/ws/036ad4bb0dcb4b8c952230ab7b47ea52"
 
+# Cache Management
 class MemoryCache(Cache):
     _CACHE = {}
 
@@ -84,7 +90,6 @@ class MemoryCache(Cache):
     def set(self, url, content):
         MemoryCache._CACHE[url] = content
 
-# 2. Cache Management
 class Cache:
     def __init__(self):
         self.data = {}
@@ -100,7 +105,66 @@ class Cache:
 
 cache = Cache()
 
-# 3. Database Operations
+# WebSockets ###
+async def connect_to_websocket(uri: str):
+    backoff = 1
+    max_backoff = 60
+    while True:
+        try:
+            async with websockets.connect(uri) as websocket:
+                logger.info(f"Connected to WebSocket: {uri}")
+                await listen_for_messages(websocket)
+                return
+        except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.InvalidURI) as e:
+            logger.error(f"WebSocket connection error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error during connection: {e}")
+        
+        logger.info(f"Reconnecting in {backoff} seconds...")
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
+
+async def listen_for_messages(websocket):
+    global balance, trigger_amount
+    try:
+        while True:
+            message = await websocket.recv()
+            payment_data = json.loads(message)
+            logger.info(f"Received payment data: {payment_data}")
+            
+            # Use a single variable for payment data
+            payment = payment_data.get('payment', {})
+            payment_amount = payment.get('amount', 0)
+            wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
+            wallet_balance = payment_data.get('wallet_balance')
+            
+            if wallet_balance is not None:
+                balance = wallet_balance
+
+            if wallet_fiat_rate is not None:
+                trigger_amount = math.floor(wallet_fiat_rate)
+            
+            # feeder
+            if balance >= trigger_amount:
+                if await trigger_feeder():
+                    status = await send_payment(balance)
+            
+                    if status['success']:
+                        message = await messaging.make_messages(config['NOS_SEC'], int(payment_amount / 1000), 0, "feeder_triggered")
+                        await update_message_in_db(message)
+                    
+            else:
+                difference = round(trigger_amount - float(balance))
+                min_sats = 21
+                
+                if payment_amount >= min_sats:
+                    message = await messaging.make_messages(config['NOS_SEC'], int(payment_amount / 1000), difference, "sats_received")
+                    await update_message_in_db(message)
+
+    except websockets.ConnectionClosed:
+        logger.info("WebSocket connection closed")
+
+# Database 
 database = Database('sqlite:///cyberherd.db')
 
 @app.on_event("startup")
@@ -127,6 +191,8 @@ async def startup():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    asyncio.create_task(connect_to_websocket(HERD_WEBSOCKET))
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -297,10 +363,10 @@ async def update_cyberherd_targets(targets):
 
 async def get_balance(force_refresh=False):
     try:
-        if not force_refresh:
-            cached_balance = await cache.get('balance')
-            if cached_balance is not None:
-                return cached_balance
+        global balance  # Reference the global balance variable
+
+        if balance is not None and not force_refresh:
+            return balance
 
         response = await http_client.get(f'{LNBITS_URL}/api/v1/wallet', headers={'X-Api-Key': config['HERD_KEY']})
         response.raise_for_status()
@@ -424,42 +490,11 @@ async def send_payment(balance: int):
     return {"success": False, "message": "Failed to send payment after 3 attempts"}
 
 # 6. API Routes
-@app.post('/lnurlp/hooker')
-async def webhook(data: HookData):
-    logger.debug(f"Received payment data: {data}")
-        
-    if await is_feeder_on():
-        logger.info('Feeder off, skipping...')
-        return 'feeder_off'
-    
-    description = data.description
-    amount = int(data.amount / 1000) if data.amount else 0
-    balance = round(int(await get_balance(True)) / 1000)
-    trigger = await get_trigger_amount_route()
-    trigger_amount = trigger['trigger_amount']
-    
-    if await should_trigger_feeder(balance, trigger_amount):
-        if await trigger_feeder():
-            status = await send_payment(balance)
-            
-            if status['success']:
-                message = await messaging.make_messages(config['NOS_SEC'], int(data.amount / 1000), 0, "feeder_triggered")
-                await update_message_in_db(message)
-
-    else:
-        difference = round(trigger_amount - float(balance))
-        # send message if amount is greater than 1 cent in Sats
-        min_sats = 21 #await convert_to_sats(0.01)
-        if amount >= min_sats:
-            message = await messaging.make_messages(config['NOS_SEC'], amount, difference, "sats_received")
-            await update_message_in_db(message)
-            return "received"
-            
-    return 'payment_processed'
 
 @app.get("/balance")
-async def balance():
-    return await get_balance()
+async def get_balance_route(force_refresh: bool = False):
+    balance_value = await get_balance(force_refresh)
+    return {"balance": balance_value}
 
 @app.post("/create-invoice/{amount}")
 async def create_invoice_route(
@@ -573,17 +608,18 @@ async def delete_cyber_herd(lud16: str):
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
-    try:
-        trigger_amount = await cache.get('trigger_amount')
-        if trigger_amount is None:
-            trigger_amount = await convert_to_sats(1.00)
-            await cache.set('trigger_amount', trigger_amount, ttl=300)
+    global trigger_amount
+    if trigger_amount is not None:
         return {"trigger_amount": trigger_amount}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error retrieving trigger amount: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    else:
+        try:
+            # Retrieve trigger amount as before
+            trigger_amount = await convert_to_sats(1.00)  # Assuming convert_to_sats fetches the amount as you want
+            await cache.set('trigger_amount', trigger_amount, ttl=300)
+            return {"trigger_amount": trigger_amount}
+        except Exception as e:
+            logger.error(f"Error retrieving trigger amount: {e}")
+            raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/convert/{amount}")
 async def convert(amount: float):
