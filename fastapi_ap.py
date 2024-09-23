@@ -21,7 +21,7 @@ from asyncio import Lock
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
-PRICE = float(os.getenv('PRICE', 0.50))
+PRICE = float(os.getenv('PRICE', 1.00))
 PAYMENT_PERCENTAGE = float(os.getenv('PAYMENT_PERCENTAGE', 0.99))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
@@ -102,60 +102,93 @@ async def connect_to_websocket(uri: str):
     global websocket_connection
     backoff = 1
     max_backoff = 60
-    while True:
+    jitter = 0.1  # Introduce some randomness to avoid synchronization issues
+    max_retries = 10  # Optional cap on retries
+    retries = 0
+    
+    while retries < max_retries:
         try:
             async with websockets.connect(uri) as websocket:
                 websocket_connection = websocket
                 logger.info(f"Connected to WebSocket: {uri}")
+                retries = 0  # Reset retries on successful connection
                 await listen_for_messages(websocket)
-        except (websockets.exceptions.ConnectionClosedError, websockets.exceptions.InvalidURI) as e:
-            logger.error(f"WebSocket connection error: {e}")
+                return  # Exit if the connection is successful and stable
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.error(f"WebSocket connection closed: {e}")
+        except websockets.exceptions.InvalidURI as e:
+            logger.error(f"WebSocket invalid URI: {e}")
+            break  # Invalid URI should not trigger retries
+        except (OSError, websockets.exceptions.InvalidHandshake) as e:
+            logger.error(f"WebSocket connection handshake failed: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error during connection: {e}")
+            logger.error(f"Unexpected error during WebSocket connection: {e}")
         
-        logger.info(f"Reconnecting in {backoff} seconds...")
-        await asyncio.sleep(backoff)
+        retries += 1
+        if retries >= max_retries:
+            logger.error(f"Max retries ({max_retries}) reached. Giving up on WebSocket connection.")
+            break  # Stop retrying after max_retries
+        
+        # Dynamic backoff with jitter
+        sleep_time = backoff + random.uniform(-jitter, jitter)
+        logger.info(f"Reconnecting in {round(sleep_time, 2)} seconds...")
+        await asyncio.sleep(sleep_time)
+        
+        # Increase backoff, but don't exceed max_backoff
         backoff = min(backoff * 2, max_backoff)
-
 
 async def listen_for_messages(websocket):
     try:
         while True:
             message = await websocket.recv()
             payment_data = json.loads(message)
-            
             logger.info(f"Received payment data: {payment_data}")
             
-            payment = payment_data.get('payment', {})
-            payment_amount = payment.get('amount', 0)
-            wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
-            wallet_balance = payment_data.get('wallet_balance')
-
-            async with app_state.lock:
-                app_state.balance = wallet_balance
-                app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
-
-            # Check if feeder override is ON, skip feeder logic if ON
-            if not await is_feeder_override_enabled():
-                if app_state.balance >= app_state.trigger_amount:
-                    if await trigger_feeder():
-                        status = await send_payment(app_state.balance)
-                    
-                        if status['success']:
-                            message = await messaging.make_messages(config['NOS_SEC'], int(payment_amount / 1000), 0, "feeder_triggered")
-                            await update_message_in_db(message)
-                else:
-                    difference = round(app_state.trigger_amount - app_state.balance)
-                    
-                    if (payment_amount / 1000) >= 100:
-                        message = await messaging.make_messages(config['NOS_SEC'], int(payment_amount / 1000), difference, "sats_received")
-                        await update_message_in_db(message)
-            else:
-                logger.info("Feeder override is ON, skipping feeder logic")
-    except websockets.ConnectionClosed:
-        logger.info("WebSocket connection closed")
+            # Processing payment data
+            await process_payment_data(payment_data)
+    except websockets.ConnectionClosed as e:
+        logger.warning(f"WebSocket connection closed: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode WebSocket message: {e}")
     except Exception as e:
         logger.error(f"Error in listen_for_messages: {e}")
+
+async def process_payment_data(payment_data):
+    try:
+        payment = payment_data.get('payment', {})
+        payment_amount = payment.get('amount', 0)
+        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
+        wallet_balance = payment_data.get('wallet_balance')
+
+        async with app_state.lock:
+            app_state.balance = wallet_balance
+            app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
+
+        # Skip if feeder override is enabled
+        if not await is_feeder_override_enabled():
+            if app_state.balance >= app_state.trigger_amount:
+                if await trigger_feeder():
+                    status = await send_payment(app_state.balance)
+                    if status['success']:
+                        message = await messaging.make_messages(
+                            config['NOS_SEC'],
+                            int(payment_amount / 1000), 0, "feeder_triggered"
+                        )
+                        await update_message_in_db(message)
+            else:
+                difference = round(app_state.trigger_amount - app_state.balance)
+                if (payment_amount / 1000) >= 21:
+                    message = await messaging.make_messages(
+                        config['NOS_SEC'], 
+                        int(payment_amount / 1000), 
+                        difference, 
+                        "sats_received"
+                    )
+                    await update_message_in_db(message)
+        else:
+            logger.info("Feeder override is ON, skipping feeder logic.")
+    except Exception as e:
+        logger.error(f"Error processing payment data: {e}")
 
 # Database
 database = Database('sqlite:///cyberherd.db')
