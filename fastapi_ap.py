@@ -18,6 +18,12 @@ import time
 from databases import Database
 import websockets
 from asyncio import Lock
+from websockets.exceptions import (
+    ConnectionClosedError,
+    ConnectionClosedOK,
+    InvalidURI,
+    InvalidHandshake,
+)
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
@@ -96,99 +102,81 @@ required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBE
 config = load_env_vars(required_env_vars)
 
 # WebSockets ###
-websocket_connection = None
+class WebSocketManager:
+    def __init__(self, uri: str, logger: logging.Logger, max_retries: Optional[int] = None):
+        self.uri = uri
+        self.logger = logger
+        self.max_retries = max_retries  # None for infinite retries
+        self.retries = 0
+        self.backoff = 1
+        self.max_backoff = 60
+        self.jitter = 0.1  # Introduce some randomness to avoid synchronization issues
+        self.websocket = None
+        self.lock = Lock()
+        self.should_run = True  # To control the reconnection loop
 
-async def connect_to_websocket(uri: str):
-    global websocket_connection
-    backoff = 1
-    max_backoff = 60
-    jitter = 0.1  # Introduce some randomness to avoid synchronization issues
-    max_retries = 10  # Optional cap on retries
-    retries = 0
-    
-    while retries < max_retries:
+    async def connect(self):
+        while self.should_run:
+            try:
+                self.logger.info(f"Attempting to connect to WebSocket: {self.uri}")
+                async with websockets.connect(
+                    self.uri,
+                    ping_interval=30,  # Send a ping every 30 seconds
+                    ping_timeout=10,   # Wait 10 seconds for a pong before considering the connection dead
+                ) as websocket:
+                    self.websocket = websocket
+                    self.logger.info(f"Connected to WebSocket: {self.uri}")
+                    self.retries = 0  # Reset retries after successful connection
+                    await self.listen()
+            except InvalidURI as e:
+                self.logger.error(f"Invalid WebSocket URI: {e}")
+                break  # Do not attempt to reconnect
+            except InvalidHandshake as e:
+                self.logger.error(f"Invalid WebSocket Handshake: {e}")
+                break  # Do not attempt to reconnect
+            except (ConnectionClosedError, ConnectionClosedOK) as e:
+                self.logger.warning(f"WebSocket connection closed: {e}")
+            except OSError as e:
+                self.logger.error(f"OS error during WebSocket connection: {e}")
+            except Exception as e:
+                self.logger.error(f"Unexpected error during WebSocket connection: {e}")
+
+            self.retries += 1
+            if self.max_retries and self.retries >= self.max_retries:
+                self.logger.error(f"Max retries ({self.max_retries}) reached. Stopping WebSocket reconnection attempts.")
+                break  # Stop attempting to reconnect
+
+            # Calculate sleep time with exponential backoff and jitter
+            sleep_time = min(self.backoff * 2 ** self.retries, self.max_backoff)
+            sleep_time += random.uniform(-self.jitter, self.jitter)
+            self.logger.info(f"Reconnecting in {round(sleep_time, 2)} seconds...")
+            await asyncio.sleep(sleep_time)
+
+    async def listen(self):
         try:
-            async with websockets.connect(uri) as websocket:
-                websocket_connection = websocket
-                logger.info(f"Connected to WebSocket: {uri}")
-                retries = 0  # Reset retries on successful connection
-                await listen_for_messages(websocket)
-                return  # Exit if the connection is successful and stable
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.error(f"WebSocket connection closed: {e}")
-        except websockets.exceptions.InvalidURI as e:
-            logger.error(f"WebSocket invalid URI: {e}")
-            break  # Invalid URI should not trigger retries
-        except (OSError, websockets.exceptions.InvalidHandshake) as e:
-            logger.error(f"WebSocket connection handshake failed: {e}")
+            async for message in self.websocket:
+                self.logger.info(f"Received message: {message}")
+                payment_data = json.loads(message)
+                await process_payment_data(payment_data)
+        except (ConnectionClosedError, ConnectionClosedOK) as e:
+            self.logger.warning(f"WebSocket connection closed during listen: {e}")
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to decode WebSocket message: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error during WebSocket connection: {e}")
-        
-        retries += 1
-        if retries >= max_retries:
-            logger.error(f"Max retries ({max_retries}) reached. Giving up on WebSocket connection.")
-            break  # Stop retrying after max_retries
-        
-        # Dynamic backoff with jitter
-        sleep_time = backoff + random.uniform(-jitter, jitter)
-        logger.info(f"Reconnecting in {round(sleep_time, 2)} seconds...")
-        await asyncio.sleep(sleep_time)
-        
-        # Increase backoff, but don't exceed max_backoff
-        backoff = min(backoff * 2, max_backoff)
+            self.logger.error(f"Error in listen_for_messages: {e}")
 
-async def listen_for_messages(websocket):
-    try:
-        while True:
-            message = await websocket.recv()
-            payment_data = json.loads(message)
-            logger.info(f"Received payment data: {payment_data}")
-            
-            # Processing payment data
-            await process_payment_data(payment_data)
-    except websockets.ConnectionClosed as e:
-        logger.warning(f"WebSocket connection closed: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode WebSocket message: {e}")
-    except Exception as e:
-        logger.error(f"Error in listen_for_messages: {e}")
+    async def disconnect(self):
+        self.should_run = False
+        if self.websocket:
+            await self.websocket.close()
+            self.logger.info("WebSocket connection closed.")
 
-async def process_payment_data(payment_data):
-    try:
-        payment = payment_data.get('payment', {})
-        payment_amount = payment.get('amount', 0)
-        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
-        wallet_balance = payment_data.get('wallet_balance')
-
-        async with app_state.lock:
-            app_state.balance = wallet_balance
-            app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
-
-        # Skip if feeder override is enabled
-        if not await is_feeder_override_enabled():
-            if app_state.balance >= app_state.trigger_amount:
-                if await trigger_feeder():
-                    status = await send_payment(app_state.balance)
-                    if status['success']:
-                        message = await messaging.make_messages(
-                            config['NOS_SEC'],
-                            int(payment_amount / 1000), 0, "feeder_triggered"
-                        )
-                        await update_message_in_db(message)
-            else:
-                difference = round(app_state.trigger_amount - app_state.balance)
-                if (payment_amount / 1000) >= 21:
-                    message = await messaging.make_messages(
-                        config['NOS_SEC'], 
-                        int(payment_amount / 1000), 
-                        difference, 
-                        "sats_received"
-                    )
-                    await update_message_in_db(message)
-        else:
-            logger.info("Feeder override is ON, skipping feeder logic.")
-    except Exception as e:
-        logger.error(f"Error processing payment data: {e}")
+# Initialize WebSocket Manager
+websocket_manager = WebSocketManager(
+    uri=HERD_WEBSOCKET,
+    logger=logger,
+    max_retries=None  # Set to None for infinite retries
+)
 
 # Database
 database = Database('sqlite:///cyberherd.db')
@@ -197,7 +185,7 @@ database = Database('sqlite:///cyberherd.db')
 async def startup():
     global http_client
     http_client = httpx.AsyncClient(http2=True)
-    asyncio.create_task(connect_to_websocket(HERD_WEBSOCKET))
+    asyncio.create_task(websocket_manager.connect())
     
     await database.connect()
     await database.execute('''
@@ -234,8 +222,7 @@ async def startup():
 async def shutdown():
     await http_client.aclose()
     await database.disconnect()
-    if websocket_connection:
-        await websocket_connection.close()
+    await websocket_manager.disconnect()
 
 # Cache Management
 class DatabaseCache:
@@ -430,6 +417,47 @@ async def update_cyberherd_targets(targets):
         logger.error(f"Error updating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+async def notify_new_members(new_members, difference, current_herd_size):
+    for item_dict in new_members:
+        spots_remaining = MAX_HERD_SIZE - current_herd_size
+        try:
+            # Send the message and get both message content and command output
+            message_content, command_output = await messaging.make_messages(
+                config['NOS_SEC'],
+                0,
+                difference,
+                "cyber_herd",
+                item_dict,
+                spots_remaining
+            )
+
+            logger.info(f"Message content: {message_content}")
+            logger.info(f"Command output: {command_output}")
+
+            # Parse the command output to extract the note_id
+            command_output_json = json.loads(command_output)
+            note_id = command_output_json.get("id")
+
+            if note_id:
+                logger.info(f"Note ID for notification: {note_id}")
+                update_query = """
+                UPDATE cyber_herd
+                SET notified = :notified
+                WHERE pubkey = :pubkey
+                """
+                rows_affected = await database.execute(
+                    update_query,
+                    values={"notified": note_id, "pubkey": item_dict['pubkey']}
+                )
+                if rows_affected == 0:
+                    logger.error(f"No rows were updated for pubkey: {item_dict['pubkey']}")
+                else:
+                    logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
+            else:
+                logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
+        except Exception as e:
+            logger.exception(f"Error while notifying and updating for pubkey: {item_dict['pubkey']}")
+
 async def get_balance(force_refresh=False):
     try:
         async with app_state.lock:
@@ -442,7 +470,7 @@ async def get_balance(force_refresh=False):
         async with app_state.lock:
             app_state.balance = balance
         return balance
-        
+            
     except httpx.HTTPError as e:
         logger.error(f"HTTP error retrieving balance: {e}")
         raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to retrieve balance")
@@ -646,46 +674,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-async def notify_new_members(new_members, difference, current_herd_size):
-    for item_dict in new_members:
-        spots_remaining = MAX_HERD_SIZE - current_herd_size
-        try:
-            # Send the message and get both message content and command output
-            message_content, command_output = await messaging.make_messages(
-                config['NOS_SEC'],
-                0,
-                difference,
-                "cyber_herd",
-                item_dict,
-                spots_remaining
-            )
-            logger.info(f"Message content: {message_content}")
-            logger.info(f"Command output: {command_output}")
-
-            # Parse the command output to extract the note_id
-            command_output_json = json.loads(command_output)
-            note_id = command_output_json.get("id")
-
-            if note_id:
-                logger.info(f"Note ID for notification: {note_id}")
-                update_query = """
-                UPDATE cyber_herd
-                SET notified = :notified
-                WHERE pubkey = :pubkey
-                """
-                rows_affected = await database.execute(
-                    update_query,
-                    values={"notified": note_id, "pubkey": item_dict['pubkey']}
-                )
-                if rows_affected == 0:
-                    logger.error(f"No rows were updated for pubkey: {item_dict['pubkey']}")
-                else:
-                    logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
-            else:
-                logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
-        except Exception as e:
-            logger.exception(f"Error while notifying and updating for pubkey: {item_dict['pubkey']}")
-
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
     return await get_cyber_herd_list()
@@ -864,3 +852,41 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal Server Error"}
     )
+
+# Payment Processing Function
+async def process_payment_data(payment_data):
+    try:
+        payment = payment_data.get('payment', {})
+        payment_amount = payment.get('amount', 0)
+        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
+        wallet_balance = payment_data.get('wallet_balance')
+
+        async with app_state.lock:
+            app_state.balance = wallet_balance
+            app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
+
+        # Skip if feeder override is enabled
+        if not await is_feeder_override_enabled():
+            if app_state.balance >= (app_state.trigger_amount - 5):
+                if await trigger_feeder():
+                    status = await send_payment(app_state.balance)
+                    if status['success']:
+                        message = await messaging.make_messages(
+                            config['NOS_SEC'],
+                            int(payment_amount / 1000), 0, "feeder_triggered"
+                        )
+                        await update_message_in_db(message)
+            else:
+                difference = round(app_state.trigger_amount - app_state.balance)
+                if (payment_amount / 1000) >= 21:
+                    message = await messaging.make_messages(
+                        config['NOS_SEC'], 
+                        int(payment_amount / 1000), 
+                        difference, 
+                        "sats_received"
+                    )
+                    await update_message_in_db(message)
+        else:
+            logger.info("Feeder override is ON, skipping feeder logic.")
+    except Exception as e:
+        logger.error(f"Error processing payment data: {e}")
