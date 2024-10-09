@@ -24,11 +24,20 @@ from websockets.exceptions import (
     InvalidURI,
     InvalidHandshake,
 )
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_log,
+    AsyncRetrying,
+    wait_fixed,
+)
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
 PRICE = float(os.getenv('PRICE', 1.00))
-PAYMENT_PERCENTAGE = float(os.getenv('PAYMENT_PERCENTAGE', 0.99))
+PAYMENT_PERCENTAGE = float(os.getenv('PAYMENT_PERCENTAGE', 1.00))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
 HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036ad4bb0dcb4b8c952230ab7b47ea52")
@@ -64,6 +73,7 @@ class HookData(BaseModel):
 class CyberHerdData(BaseModel):
     display_name: Optional[str] = 'Anon'
     event_id: str
+    note: str
     kinds: List[int] = []
     pubkey: str
     nprofile: str
@@ -71,6 +81,9 @@ class CyberHerdData(BaseModel):
     notified: Optional[str] = None
     payouts: float = 0.0
 
+    class Config:
+        extra = 'ignore'
+        
     @validator('lud16')
     def validate_lud16(cls, v):
         # Add validation logic for lud16
@@ -98,8 +111,41 @@ def load_env_vars(required_vars):
         raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
     return {var: os.getenv(var) for var in required_vars}
 
-required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
+required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 config = load_env_vars(required_env_vars)
+
+# Define Retry Decorators
+
+# Retry decorator for HTTP requests using httpx
+http_retry = retry(
+    reraise=True,  # Re-raise the last exception if all retries fail
+    stop=stop_after_attempt(5),  # Stop after 5 attempts
+    wait=wait_exponential(multiplier=1, min=4, max=10),  # Exponential backoff: 4s, 8s, 16s, etc.
+    retry=retry_if_exception_type(httpx.RequestError)  # Retry on specific exceptions
+)
+
+# Retry decorator for WebSocket connections
+websocket_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(None),  # Infinite retries
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    retry=retry_if_exception_type((
+        ConnectionClosedError,
+        ConnectionClosedOK,
+        InvalidURI,
+        InvalidHandshake,
+        OSError,
+    )),
+    before=before_log(logger, logging.WARNING)
+)
+
+# Retry decorator for Database operations
+db_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(2),  # Wait 2 seconds between retries
+    retry=retry_if_exception_type((Exception,))  # Adjust exception types as needed
+)
 
 # WebSockets ###
 class WebSocketManager:
@@ -107,50 +153,32 @@ class WebSocketManager:
         self.uri = uri
         self.logger = logger
         self.max_retries = max_retries  # None for infinite retries
-        self.retries = 0
-        self.backoff = 1
-        self.max_backoff = 60
-        self.jitter = 0.1  # Introduce some randomness to avoid synchronization issues
         self.websocket = None
         self.lock = Lock()
         self.should_run = True  # To control the reconnection loop
 
     async def connect(self):
-        while self.should_run:
-            try:
-                self.logger.info(f"Attempting to connect to WebSocket: {self.uri}")
-                async with websockets.connect(
+        async for attempt in AsyncRetrying(
+            reraise=True,
+            stop=stop_after_attempt(self.max_retries) if self.max_retries else stop_after_attempt(1000),  # Arbitrary large number for infinite
+            wait=wait_exponential(multiplier=1, min=4, max=60),
+            retry=retry_if_exception_type((
+                ConnectionClosedError,
+                ConnectionClosedOK,
+                InvalidURI,
+                InvalidHandshake,
+                OSError,
+            )),
+            before=before_log(logger, logging.WARNING)
+        ):
+            with attempt:
+                self.websocket = await websockets.connect(
                     self.uri,
                     ping_interval=30,  # Send a ping every 30 seconds
                     ping_timeout=10,   # Wait 10 seconds for a pong before considering the connection dead
-                ) as websocket:
-                    self.websocket = websocket
-                    self.logger.info(f"Connected to WebSocket: {self.uri}")
-                    self.retries = 0  # Reset retries after successful connection
-                    await self.listen()
-            except InvalidURI as e:
-                self.logger.error(f"Invalid WebSocket URI: {e}")
-                break  # Do not attempt to reconnect
-            except InvalidHandshake as e:
-                self.logger.error(f"Invalid WebSocket Handshake: {e}")
-                break  # Do not attempt to reconnect
-            except (ConnectionClosedError, ConnectionClosedOK) as e:
-                self.logger.warning(f"WebSocket connection closed: {e}")
-            except OSError as e:
-                self.logger.error(f"OS error during WebSocket connection: {e}")
-            except Exception as e:
-                self.logger.error(f"Unexpected error during WebSocket connection: {e}")
-
-            self.retries += 1
-            if self.max_retries and self.retries >= self.max_retries:
-                self.logger.error(f"Max retries ({self.max_retries}) reached. Stopping WebSocket reconnection attempts.")
-                break  # Stop attempting to reconnect
-
-            # Calculate sleep time with exponential backoff and jitter
-            sleep_time = min(self.backoff * 2 ** self.retries, self.max_backoff)
-            sleep_time += random.uniform(-self.jitter, self.jitter)
-            self.logger.info(f"Reconnecting in {round(sleep_time, 2)} seconds...")
-            await asyncio.sleep(sleep_time)
+                )
+                self.logger.info(f"Connected to WebSocket: {self.uri}")
+                await self.listen()
 
     async def listen(self):
         try:
@@ -193,6 +221,7 @@ async def startup():
             pubkey TEXT PRIMARY KEY,
             display_name TEXT,
             event_id TEXT,
+            note TEXT,
             kinds TEXT,
             nprofile TEXT,
             lud16 TEXT,
@@ -268,6 +297,7 @@ async def cleanup_cache():
             logger.error(f"Error cleaning up cache: {e}")
 
 # Database Functions
+@db_retry
 async def get_cyber_herd_list() -> List[dict]:
     try:
         query = "SELECT * FROM cyber_herd"
@@ -285,6 +315,7 @@ async def get_cyber_herd_list() -> List[dict]:
         logger.error(f"Error retrieving cyber herd list: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@db_retry
 async def update_cyber_herd_list(new_data: List[dict], reset=False):
     try:
         if reset:
@@ -293,14 +324,15 @@ async def update_cyber_herd_list(new_data: List[dict], reset=False):
 
         query = '''
             INSERT OR REPLACE INTO cyber_herd
-            (pubkey, display_name, event_id, kinds, nprofile, lud16, notified, payouts)
-            VALUES (:pubkey, :display_name, :event_id, :kinds, :nprofile, :lud16, :notified, :payouts)
+            (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
+            VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts)
         '''
         for item in new_data:
             await database.execute(query, values={
                 'pubkey': item['pubkey'],
                 'display_name': item.get('display_name'),
                 'event_id': item.get('event_id'),
+                'note': item.get('note'),
                 'kinds': json.dumps(item.get('kinds', [])),
                 'nprofile': item.get('nprofile'),
                 'lud16': item.get('lud16'),
@@ -311,6 +343,7 @@ async def update_cyber_herd_list(new_data: List[dict], reset=False):
         logger.error(f"Error updating cyber herd list: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@db_retry
 async def update_message_in_db(new_message: str):
     try:
         await database.execute("INSERT INTO messages (content) VALUES (:content)", values={'content': new_message})
@@ -319,9 +352,10 @@ async def update_message_in_db(new_message: str):
         logger.error(f"Error updating messages in database: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@db_retry
 async def retrieve_messages() -> List[str]:
     try:
-        query = "SELECT content FROM messages ORDER BY timestamp DESC LIMIT 10"
+        query = "SELECT content FROM messages ORDER BY timestamp DESC"
         rows = await database.fetch_all(query)
         return [row['content'] for row in rows]
     except Exception as e:
@@ -329,27 +363,22 @@ async def retrieve_messages() -> List[str]:
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 # HTTP Client and External Service Interaction
+@http_retry
 async def fetch_cyberherd_targets():
-    try:
-        url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
-        headers = {
-            'accept': 'application/json',
-            'X-API-KEY': config['CYBERHERD_KEY']
-        }
-        response = await http_client.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error fetching cyberherd targets: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to fetch cyberherd targets")
-    except Exception as e:
-        logger.error(f"Error fetching cyberherd targets: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
+    headers = {
+        'accept': 'application/json',
+        'X-API-KEY': config['CYBERHERD_KEY']
+    }
+    response = await http_client.get(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
 
+@http_retry
 async def create_cyberherd_targets(new_targets_data, initial_targets):
     try:
         fetched_wallets = {item['wallet']: item for item in initial_targets}
-        predefined_wallet = {'wallet': 'bolverker@strike.me', 'alias': 'Sat', 'percent': 90}
+        predefined_wallet = {'wallet': 'bolverker@strike.me', 'alias': 'Bolverker', 'percent': 90}
         combined_wallets = []
         
         for item in new_targets_data:
@@ -364,25 +393,27 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
                 payouts = details.get('payouts', 1.0)
                 combined_wallets.append({'wallet': wallet, 'alias': details.get('alias', 'Unknown'), 'payouts': payouts})
         
-        total_percent_allocation = predefined_wallet['percent']
+        total_percent_allocation = predefined_wallet['percent']  # Starts at 90%
         targets_list = [predefined_wallet]
         
         if combined_wallets:
             total_payouts = sum(wallet['payouts'] for wallet in combined_wallets)
             if total_payouts == 0:
-                total_payouts = 1
+                total_payouts = 1  # Prevent division by zero
                 
+            # Allocate the remaining 5% instead of 10%
+            remaining_allocation = 95 - total_percent_allocation
             for wallet in combined_wallets:
-                base_percent = (100 - total_percent_allocation) * (wallet['payouts'] / total_payouts)
+                base_percent = remaining_allocation * (wallet['payouts'] / total_payouts)
                 wallet['percent'] = max(1, round(base_percent))
             
             total_percent_allocation += sum(wallet['percent'] for wallet in combined_wallets)
             
-            if total_percent_allocation > 100:
-                excess_allocation = total_percent_allocation - 100
+            if total_percent_allocation > 95:
+                excess_allocation = total_percent_allocation - 95
                 combined_wallets[-1]['percent'] -= excess_allocation
-            elif total_percent_allocation < 100:
-                remaining_allocation = 100 - total_percent_allocation
+            elif total_percent_allocation < 95:
+                remaining_allocation = 95 - total_percent_allocation
                 combined_wallets[-1]['percent'] += remaining_allocation
             
             for wallet in combined_wallets:
@@ -398,6 +429,7 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
         logger.error(f"Error creating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@http_retry
 async def update_cyberherd_targets(targets):
     try:
         url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
@@ -432,7 +464,7 @@ async def notify_new_members(new_members, difference, current_herd_size):
             )
 
             logger.info(f"Message content: {message_content}")
-            logger.info(f"Command output: {command_output}")
+            await update_message_in_db(message_content)
 
             # Parse the command output to extract the note_id
             command_output_json = json.loads(command_output)
@@ -445,19 +477,17 @@ async def notify_new_members(new_members, difference, current_herd_size):
                 SET notified = :notified
                 WHERE pubkey = :pubkey
                 """
-                rows_affected = await database.execute(
+                await database.execute(
                     update_query,
                     values={"notified": note_id, "pubkey": item_dict['pubkey']}
                 )
-                if rows_affected == 0:
-                    logger.error(f"No rows were updated for pubkey: {item_dict['pubkey']}")
-                else:
-                    logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
+                logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
             else:
                 logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
         except Exception as e:
             logger.exception(f"Error while notifying and updating for pubkey: {item_dict['pubkey']}")
 
+@http_retry
 async def get_balance(force_refresh=False):
     try:
         async with app_state.lock:
@@ -478,6 +508,7 @@ async def get_balance(force_refresh=False):
         logger.error(f"Error retrieving balance: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@http_retry
 async def convert_to_sats(amount: float, force_refresh=False):
     try:
         payload = {"from_": "usd", "amount": amount, "to": "sat"}
@@ -492,6 +523,7 @@ async def convert_to_sats(amount: float, force_refresh=False):
         logger.error(f"Error converting amount: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@http_retry
 async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KEY']):
     try:
         url = f"{LNBITS_URL}/api/v1/payments"
@@ -509,11 +541,12 @@ async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KE
         return response.json()['payment_request']
     except httpx.HTTPError as e:
         logger.error(f"HTTP error creating invoice: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to create invoice")
+        raise  # Tenacity will handle the retry
     except Exception as e:
         logger.error(f"Error creating invoice: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise
 
+@http_retry
 async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
     try:
         url = f"{LNBITS_URL}/api/v1/payments"
@@ -530,11 +563,12 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
         return response.json()
     except httpx.HTTPError as e:
         logger.error(f"HTTP error paying invoice: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to pay invoice")
+        raise  # Tenacity will handle the retry
     except Exception as e:
         logger.error(f"Error paying invoice: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise
 
+@http_retry
 async def is_feeder_override_enabled():
     try:
         response = await http_client.get(f'{OPENHAB_URL}/rest/items/FeederOverride/state', auth=(config['OH_AUTH_1'], ''))
@@ -547,6 +581,7 @@ async def is_feeder_override_enabled():
         logger.error(f"Error checking feeder status: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@http_retry
 async def trigger_feeder():
     try:
         response = await http_client.post(f'{OPENHAB_URL}/rest/rules/88bd9ec4de/runnow', auth=(config['OH_AUTH_1'], ''))
@@ -563,6 +598,7 @@ async def trigger_feeder():
 def get_youtube_client(api_key):
     return build('youtube', 'v3', developerKey=api_key, cache_discovery=False)
 
+@http_retry
 async def get_live_broadcast_id(channel_id: str):
     try:
         cached_video_id = await cache.get(f'live_video_{channel_id}')
@@ -584,10 +620,14 @@ async def get_live_broadcast_id(channel_id: str):
             return video_id
         else:
             raise HTTPException(status_code=404, detail="No live broadcast found")
+    except HTTPException as e:
+        logger.error(f"Failed to fetch live broadcast ID: {e.detail}")
+        raise e
     except Exception as e:
         logger.error(f"Failed to fetch live broadcast ID: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch live broadcast ID")
 
+@http_retry
 async def send_payment(balance: int):
     balance = balance * 1000
     withdraw = int(round(balance * PAYMENT_PERCENTAGE) / 1000)
@@ -599,6 +639,9 @@ async def send_payment(balance: int):
         return {"success": True, "data": payment_status}
     except HTTPException as e:
         logger.error(f"Failed to send payment: {e.detail}")
+        return {"success": False, "message": "Failed to send payment"}
+    except Exception as e:
+        logger.error(f"Failed to send payment: {e}")
         return {"success": False, "message": "Failed to send payment"}
 
 # API Routes
@@ -612,7 +655,14 @@ async def create_invoice_route(
     amount: int = Path(..., description="The amount for the invoice in satoshis"),
     memo: str = Query("Default memo", description="The memo for the invoice")
 ):
-    return {"payment_request": await create_invoice(amount, memo)}
+    try:
+        payment_request = await create_invoice(amount, memo)
+        return {"payment_request": payment_request}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in /create-invoice route: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData], background_tasks: BackgroundTasks):
@@ -657,8 +707,8 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
 
         if new_members:
             insert_query = """
-            INSERT INTO cyber_herd (pubkey, display_name, event_id, kinds, nprofile, lud16, notified, payouts)
-            VALUES (:pubkey, :display_name, :event_id, :kinds, :nprofile, :lud16, :notified, :payouts)
+            INSERT INTO cyber_herd (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
+            VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts)
             """
             await database.execute_many(insert_query, new_members)
 
@@ -670,29 +720,37 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
         background_tasks.add_task(notify_new_members, new_members, difference, current_herd_size)
         return {"status": "success", "new_members_added": len(new_members)}
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
-    return await get_cyber_herd_list()
+    try:
+        return await get_cyber_herd_list()
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in /get_cyber_herd route: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
-    await update_cyber_herd_list([], reset=True)
-
-    headers = {
-        'accept': 'application/json',
-        'X-API-KEY': config['CYBERHERD_KEY']
-    }
-    url = f"{LNBITS_URL}/splitpayments/api/v1/targets?api-key={config['CYBERHERD_KEY']}"
-
     try:
+        await update_cyber_herd_list([], reset=True)
+
+        headers = {
+            'accept': 'application/json',
+            'X-API-KEY': config['CYBERHERD_KEY']
+        }
+        url = f"{LNBITS_URL}/splitpayments/api/v1/targets?api-key={config['CYBERHERD_KEY']}"
+
         response = await http_client.delete(url, headers=headers)
         response.raise_for_status()
         return {"status": "success", "message": "CyberHerd reset successfully."}
-    except httpx.RequestError as e:
+    except httpx.HTTPError as e:
         logger.error(f"Request failed: {e}")
         raise HTTPException(status_code=500, detail="Request to API failed.")
     except Exception as e:
@@ -718,25 +776,41 @@ async def delete_cyber_herd(lud16: str):
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
-    async with app_state.lock:
-        if app_state.trigger_amount is not None:
-            return {"trigger_amount": app_state.trigger_amount}
     try:
+        async with app_state.lock:
+            if app_state.trigger_amount is not None:
+                return {"trigger_amount": app_state.trigger_amount}
         trigger_amount = await convert_to_sats(PRICE)
         async with app_state.lock:
             app_state.trigger_amount = trigger_amount
         return {"trigger_amount": trigger_amount}
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Error retrieving trigger amount: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/convert/{amount}")
 async def convert(amount: float):
-    return await convert_to_sats(amount)
+    try:
+        sats = await convert_to_sats(amount)
+        return {"sats": sats}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in /convert route: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/feeder_status")
 async def feeder_status():
-    return await is_feeder_override_enabled()
+    try:
+        status = await is_feeder_override_enabled()
+        return {"feeder_override_enabled": status}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in /feeder_status route: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/islive/{channel_id}")
 async def live_status(channel_id: str):
@@ -745,21 +819,8 @@ async def live_status(channel_id: str):
         if cached_video_id:
             return {'status': 'live', 'video_id': cached_video_id}
 
-        youtube = get_youtube_client(config['GOOGLE_API_KEY'])
-        request = youtube.search().list(
-            part="id,snippet",
-            channelId=channel_id,
-            type="video",
-            eventType="live"
-        )
-        response = request.execute()
-        
-        if response['items']:
-            video_id = response['items'][0]['id']['videoId']
-            await cache.set(f'live_video_{channel_id}', video_id, ttl=300)
-            return {'status': 'live', 'video_id': video_id}
-        else:
-            return {'status': 'offline'}
+        video_id = await get_live_broadcast_id(channel_id)
+        return {'status': 'live', 'video_id': video_id}
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -767,7 +828,7 @@ async def live_status(channel_id: str):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/messages", response_model=List[Message])
-async def get_messages():
+async def get_messages_route():   
     try:
         messages = await retrieve_messages()
         formatted_messages = [Message(content=msg) for msg in messages if isinstance(msg, str)]
@@ -787,7 +848,7 @@ async def handle_cyberherd_treats(data: CyberHerdTreats):
         cyber_herd_dict = {item['pubkey']: item for item in cyber_herd_list}
         
         if pubkey in cyber_herd_dict:
-            message_data = await messaging.make_messages(config['NOS_SEC'], amount, 0, "cyber_herd_treats", cyber_herd_dict[pubkey])
+            message_data, _ = await messaging.make_messages(config['NOS_SEC'], amount, 0, "cyber_herd_treats", cyber_herd_dict[pubkey])
             await update_message_in_db(message_data)
             return {"status": "success"}
         else:
@@ -801,7 +862,7 @@ async def handle_cyberherd_treats(data: CyberHerdTreats):
 @app.get("/messages/info")
 async def create_info_message():
     try:
-        message_data = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
+        message_data, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
         await update_message_in_db(message_data)
         messages = await retrieve_messages()
         return [Message(content=msg) for msg in messages]
@@ -854,6 +915,12 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 # Payment Processing Function
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception)  # Customize as needed
+)
 async def process_payment_data(payment_data):
     try:
         payment = payment_data.get('payment', {})
@@ -871,7 +938,7 @@ async def process_payment_data(payment_data):
                 if await trigger_feeder():
                     status = await send_payment(app_state.balance)
                     if status['success']:
-                        message = await messaging.make_messages(
+                        message, _ = await messaging.make_messages(
                             config['NOS_SEC'],
                             int(payment_amount / 1000), 0, "feeder_triggered"
                         )
@@ -879,7 +946,7 @@ async def process_payment_data(payment_data):
             else:
                 difference = round(app_state.trigger_amount - app_state.balance)
                 if (payment_amount / 1000) >= 21:
-                    message = await messaging.make_messages(
+                    message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
                         int(payment_amount / 1000), 
                         difference, 
@@ -890,3 +957,4 @@ async def process_payment_data(payment_data):
             logger.info("Feeder override is ON, skipping feeder logic.")
     except Exception as e:
         logger.error(f"Error processing payment data: {e}")
+        raise  # Let Tenacity handle the retry
