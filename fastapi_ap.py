@@ -17,7 +17,7 @@ import random
 import time
 from databases import Database
 import websockets
-from asyncio import Lock
+from asyncio import Lock, Event
 from websockets.exceptions import (
     ConnectionClosedError,
     ConnectionClosedOK,
@@ -41,6 +41,10 @@ PAYMENT_PERCENTAGE = float(os.getenv('PAYMENT_PERCENTAGE', 1.00))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
 HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036ad4bb0dcb4b8c952230ab7b47ea52")
+PREDEFINED_WALLET_ADDRESS = 'bolverker@strike.me' 
+PREDEFINED_WALLET_ALIAS = 'Bolverker'             
+PREDEFINED_WALLET_PERCENT_RESET = 100             
+PREDEFINED_WALLET_PERCENT_DEFAULT = 80           
 
 # Logging Configuration
 logging.basicConfig(
@@ -152,58 +156,122 @@ class WebSocketManager:
     def __init__(self, uri: str, logger: logging.Logger, max_retries: Optional[int] = None):
         self.uri = uri
         self.logger = logger
-        self.max_retries = max_retries  # None for infinite retries
+        self.max_retries = max_retries
         self.websocket = None
         self.lock = Lock()
-        self.should_run = True  # To control the reconnection loop
+        self.should_run = True
+        self.connected = Event()
+        self.listen_task = None
+        self._retry_count = 0
 
     async def connect(self):
-        async for attempt in AsyncRetrying(
-            reraise=True,
-            stop=stop_after_attempt(self.max_retries) if self.max_retries else stop_after_attempt(1000),  # Arbitrary large number for infinite
-            wait=wait_exponential(multiplier=1, min=4, max=60),
-            retry=retry_if_exception_type((
-                ConnectionClosedError,
-                ConnectionClosedOK,
-                InvalidURI,
-                InvalidHandshake,
-                OSError,
-            )),
-            before=before_log(logger, logging.WARNING)
-        ):
-            with attempt:
-                self.websocket = await websockets.connect(
-                    self.uri,
-                    ping_interval=30,  # Send a ping every 30 seconds
-                    ping_timeout=10,   # Wait 10 seconds for a pong before considering the connection dead
-                )
-                self.logger.info(f"Connected to WebSocket: {self.uri}")
-                await self.listen()
+        async with self.lock:
+            while self.should_run:
+                try:
+                    if self.websocket:
+                        await self.websocket.close()
+                    
+                    self.websocket = await websockets.connect(
+                        self.uri,
+                        ping_interval=30,
+                        ping_timeout=10,
+                        close_timeout=10
+                    )
+                    
+                    self.logger.info(f"Connected to WebSocket: {self.uri}")
+                    self.connected.set()
+                    self._retry_count = 0  # Reset retry count on successful connection
+                    
+                    # Start listening in a separate task
+                    self.listen_task = asyncio.create_task(self.listen())
+                    
+                    # Wait for the listen task to complete
+                    await self.listen_task
+
+                except (ConnectionClosedError, ConnectionClosedOK, InvalidURI, InvalidHandshake, OSError) as e:
+                    self.logger.warning(f"WebSocket connection error: {e}")
+                    self.connected.clear()
+                    
+                    if self.should_run:
+                        if self.max_retries is not None and self._retry_count >= self.max_retries:
+                            self.logger.error("Maximum reconnection attempts reached. Stopping reconnection.")
+                            break
+                        
+                        backoff = min(60, (2 ** self._retry_count))
+                        self.logger.info(f"Attempting reconnection in {backoff} seconds (Retry {self._retry_count + 1})...")
+                        self._retry_count += 1
+                        await asyncio.sleep(backoff)
+                    else:
+                        break
+                except Exception as e:
+                    self.logger.error(f"Unexpected error in WebSocket connection: {e}")
+                    self.connected.clear()
+                    if self.should_run:
+                        self.logger.info("Retrying connection in 5 seconds due to unexpected error.")
+                        await asyncio.sleep(5)
+                    else:
+                        break
 
     async def listen(self):
         try:
             async for message in self.websocket:
-                self.logger.info(f"Received message: {message}")
-                payment_data = json.loads(message)
-                await process_payment_data(payment_data)
+                try:
+                    self.logger.debug(f"Received message: {message}")
+                    payment_data = json.loads(message)
+                    await process_payment_data(payment_data)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to decode WebSocket message: {e}")
+                except Exception as e:
+                    self.logger.error(f"Error processing message: {e}")
+                    # Continue listening even if processing fails
         except (ConnectionClosedError, ConnectionClosedOK) as e:
             self.logger.warning(f"WebSocket connection closed during listen: {e}")
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to decode WebSocket message: {e}")
+            # Propagate to trigger reconnection
+            raise
         except Exception as e:
-            self.logger.error(f"Error in listen_for_messages: {e}")
+            self.logger.error(f"Unexpected error in listen: {e}")
+            raise
 
     async def disconnect(self):
-        self.should_run = False
-        if self.websocket:
-            await self.websocket.close()
-            self.logger.info("WebSocket connection closed.")
+        async with self.lock:
+            self.should_run = False
+            if self.listen_task:
+                self.listen_task.cancel()
+                try:
+                    await self.listen_task
+                except asyncio.CancelledError:
+                    self.logger.debug("Listen task cancelled.")
+                except Exception as e:
+                    self.logger.error(f"Error while cancelling listen task: {e}")
+                self.listen_task = None
+            if self.websocket:
+                try:
+                    await self.websocket.close()
+                    self.logger.info("WebSocket connection closed gracefully.")
+                except Exception as e:
+                    self.logger.error(f"Error during WebSocket disconnect: {e}")
+                finally:
+                    self.websocket = None
+            self.connected.clear()
+
+    async def wait_for_connection(self, timeout: Optional[float] = None) -> bool:
+        """Wait for the WebSocket to be connected within the specified timeout."""
+        try:
+            await asyncio.wait_for(self.connected.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            self.logger.warning("Timeout while waiting for WebSocket connection.")
+            return False
+
+    async def run(self):
+        """Convenience method to start the connection management."""
+        await self.connect()
 
 # Initialize WebSocket Manager
 websocket_manager = WebSocketManager(
     uri=HERD_WEBSOCKET,
     logger=logger,
-    max_retries=None  # Set to None for infinite retries
+    max_retries=5
 )
 
 # Database
@@ -213,7 +281,12 @@ database = Database('sqlite:///cyberherd.db')
 async def startup():
     global http_client
     http_client = httpx.AsyncClient(http2=True)
-    asyncio.create_task(websocket_manager.connect())
+    
+    # Create and start the WebSocket manager
+    websocket_task = asyncio.create_task(websocket_manager.connect())
+    connected = await websocket_manager.wait_for_connection(timeout=30)
+    if not connected:
+        logger.warning("Initial WebSocket connection attempt timed out")
     
     await database.connect()
     await database.execute('''
@@ -375,54 +448,58 @@ async def fetch_cyberherd_targets():
     return response.json()
 
 @http_retry
-async def create_cyberherd_targets(new_targets_data, initial_targets):
+async def create_cyberherd_targets(new_targets_data, initial_targets, predefined_percent=PREDEFINED_WALLET_PERCENT_DEFAULT):
     try:
         fetched_wallets = {item['wallet']: item for item in initial_targets}
-        predefined_wallet = {'wallet': 'bolverker@strike.me', 'alias': 'Bolverker', 'percent': 90}
+        predefined_wallet = {
+            'wallet': PREDEFINED_WALLET_ADDRESS,
+            'alias': PREDEFINED_WALLET_ALIAS,
+            'percent': predefined_percent  # Use the passed allocation percentage
+        }
         combined_wallets = []
-        
+
         for item in new_targets_data:
             wallet = item['wallet']
             name = item.get('alias', 'Unknown')
             payouts = item.get('payouts', 1.0)
             if wallet not in fetched_wallets and wallet != predefined_wallet['wallet']:
                 combined_wallets.append({'wallet': wallet, 'alias': name, 'payouts': payouts})
-        
+
         for wallet, details in fetched_wallets.items():
             if wallet != predefined_wallet['wallet']:
                 payouts = details.get('payouts', 1.0)
                 combined_wallets.append({'wallet': wallet, 'alias': details.get('alias', 'Unknown'), 'payouts': payouts})
-        
-        total_percent_allocation = predefined_wallet['percent']  # Starts at 90%
+
+        total_percent_allocation = predefined_wallet['percent']  # Starts at predefined_percent
         targets_list = [predefined_wallet]
-        
+
         if combined_wallets:
             total_payouts = sum(wallet['payouts'] for wallet in combined_wallets)
             if total_payouts == 0:
                 total_payouts = 1  # Prevent division by zero
-                
-            # Allocate the remaining 5% instead of 10%
-            remaining_allocation = 95 - total_percent_allocation
+
+            # Allocate the remaining percentage (e.g., 90% or 100% depending on context)
+            remaining_allocation = 100 - total_percent_allocation
             for wallet in combined_wallets:
                 base_percent = remaining_allocation * (wallet['payouts'] / total_payouts)
                 wallet['percent'] = max(1, round(base_percent))
-            
+
             total_percent_allocation += sum(wallet['percent'] for wallet in combined_wallets)
-            
-            if total_percent_allocation > 95:
-                excess_allocation = total_percent_allocation - 95
+
+            if total_percent_allocation > 100:
+                excess_allocation = total_percent_allocation - 100
                 combined_wallets[-1]['percent'] -= excess_allocation
-            elif total_percent_allocation < 95:
-                remaining_allocation = 95 - total_percent_allocation
+            elif total_percent_allocation < 100:
+                remaining_allocation = 100 - total_percent_allocation
                 combined_wallets[-1]['percent'] += remaining_allocation
-            
+
             for wallet in combined_wallets:
                 targets_list.append({
-                    'wallet': wallet['wallet'], 
-                    'alias': wallet['alias'], 
+                    'wallet': wallet['wallet'],
+                    'alias': wallet['alias'],
                     'percent': wallet['percent']
                 })
-        
+
         targets = {"targets": targets_list}
         return targets
     except Exception as e:
@@ -453,7 +530,6 @@ async def notify_new_members(new_members, difference, current_herd_size):
     for item_dict in new_members:
         spots_remaining = MAX_HERD_SIZE - current_herd_size
         try:
-            # Send the message and get both message content and command output
             message_content, command_output = await messaging.make_messages(
                 config['NOS_SEC'],
                 0,
@@ -462,8 +538,7 @@ async def notify_new_members(new_members, difference, current_herd_size):
                 item_dict,
                 spots_remaining
             )
-
-            logger.info(f"Message content: {message_content}")
+            
             await update_message_in_db(message_content)
 
             # Parse the command output to extract the note_id
@@ -471,7 +546,6 @@ async def notify_new_members(new_members, difference, current_herd_size):
             note_id = command_output_json.get("id")
 
             if note_id:
-                logger.info(f"Note ID for notification: {note_id}")
                 update_query = """
                 UPDATE cyber_herd
                 SET notified = :notified
@@ -509,18 +583,33 @@ async def get_balance(force_refresh=False):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
-async def convert_to_sats(amount: float, force_refresh=False):
+async def fetch_btc_price():
+    """Fetches the current price of 1 BTC in USD from OpenHAB."""
     try:
-        payload = {"from_": "usd", "amount": amount, "to": "sat"}
-        response = await http_client.post(f'{LNBITS_URL}/api/v1/conversion', json=payload)
+        response = await http_client.get(
+            f'{OPENHAB_URL}/rest/items/BTC_Price_Output/state',
+            auth=(config['OH_AUTH_1'], '')
+        )
         response.raise_for_status()
-        sats = response.json()['sats']
-        return sats
+        btc_price = float(response.text)  # Convert to float for calculations
+        return btc_price
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error converting amount: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to convert amount")
+        logger.error(f"HTTP error fetching BTC price: {e}")
+        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to fetch BTC price")
     except Exception as e:
-        logger.error(f"Error converting amount: {e}")
+        logger.error(f"Error fetching BTC price: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@http_retry
+async def convert_to_sats(amount: float):
+    """Converts a USD amount to satoshis using the current BTC price."""
+    try:
+        btc_price = await fetch_btc_price()  # Retrieve BTC price from OpenHAB
+        amount_in_btc = amount / btc_price  # Convert USD amount to BTC
+        sats = amount_in_btc * 1e8  # Convert BTC to satoshis
+        return int(sats)
+    except Exception as e:
+        logger.error(f"Error converting amount to sats: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
@@ -600,6 +689,8 @@ def get_youtube_client(api_key):
 
 @http_retry
 async def get_live_broadcast_id(channel_id: str):
+    return False
+
     try:
         cached_video_id = await cache.get(f'live_video_{channel_id}')
         if cached_video_id:
@@ -616,7 +707,7 @@ async def get_live_broadcast_id(channel_id: str):
 
         if response['items']:
             video_id = response['items'][0]['id']['videoId']
-            await cache.set(f'live_video_{channel_id}', video_id, ttl=300)
+            await cache.set(f'live_video_{channel_id}', video_id, ttl=3600)
             return video_id
         else:
             raise HTTPException(status_code=404, detail="No live broadcast found")
@@ -675,7 +766,7 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
-        balance = float(await get_balance()) / 1000
+        balance = float(await get_balance(True)) / 1000
         trigger = await get_trigger_amount_route()
         difference = round(trigger['trigger_amount'] - balance)
 
@@ -739,8 +830,10 @@ async def get_cyber_herd():
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
     try:
+        # Step 1: Reset the CyberHerd list in the database
         await update_cyber_herd_list([], reset=True)
 
+        # Step 2: Delete existing CyberHerd targets via the API
         headers = {
             'accept': 'application/json',
             'X-API-KEY': config['CYBERHERD_KEY']
@@ -749,13 +842,42 @@ async def reset_cyber_herd():
 
         response = await http_client.delete(url, headers=headers)
         response.raise_for_status()
-        return {"status": "success", "message": "CyberHerd reset successfully."}
+        logger.info("Existing CyberHerd targets deleted successfully.")
+
+        # Step 3: Create a new CyberHerd target with predefined wallet at 100% allocation
+        predefined_wallet = {
+            'wallet': PREDEFINED_WALLET_ADDRESS,      # Using the constant
+            'alias': PREDEFINED_WALLET_ALIAS,        # Using the constant
+            'percent': PREDEFINED_WALLET_PERCENT_RESET  # 100% allocation
+        }
+
+        # Prepare the payload for creating the new target
+        new_targets = {"targets": [predefined_wallet]}
+
+        # Send the PUT request to create the new target
+        create_response = await http_client.put(
+            f'{LNBITS_URL}/splitpayments/api/v1/targets',
+            headers={
+                'accept': 'application/json',
+                'X-API-KEY': config['CYBERHERD_KEY'],
+                'Content-Type': 'application/json'
+            },
+            content=json.dumps(new_targets)
+        )
+        create_response.raise_for_status()
+        logger.info("Predefined CyberHerd target created with 100% allocation.")
+
+        return {
+            "status": "success",
+            "message": "CyberHerd reset successfully with predefined target at 100% allocation."
+        }
+
     except httpx.HTTPError as e:
-        logger.error(f"Request failed: {e}")
-        raise HTTPException(status_code=500, detail="Request to API failed.")
+        logger.error(f"HTTP error during CyberHerd reset: {e}")
+        raise HTTPException(status_code=500, detail="HTTP request to CyberHerd API failed.")
     except Exception as e:
         logger.error(f"Error resetting CyberHerd: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
 
 @app.delete("/cyber_herd/delete/{lud16}")
 async def delete_cyber_herd(lud16: str):
@@ -925,6 +1047,12 @@ async def process_payment_data(payment_data):
     try:
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
+
+        # Process only positive payment amounts
+        if payment_amount <= 0:
+            logger.info("Payment amount is non-positive, skipping processing.")
+            return
+
         wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
         wallet_balance = payment_data.get('wallet_balance')
 
@@ -945,7 +1073,7 @@ async def process_payment_data(payment_data):
                         await update_message_in_db(message)
             else:
                 difference = round(app_state.trigger_amount - app_state.balance)
-                if (payment_amount / 1000) >= 21:
+                if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
                         int(payment_amount / 1000), 
@@ -958,3 +1086,4 @@ async def process_payment_data(payment_data):
     except Exception as e:
         logger.error(f"Error processing payment data: {e}")
         raise  # Let Tenacity handle the retry
+
