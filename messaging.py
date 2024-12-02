@@ -67,7 +67,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
     message_templates = message_dict.get(event_type, None)
 
     if message_templates is None:
-        return "Event type not recognized."
+        return "Event type not recognized.", None
 
     template = random.choice(list(message_templates.values()))
 
@@ -85,12 +85,12 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_nprofiles, difference_message=difference_message)
         pubkey_part = ' '.join(f'-p {pubkey}' for pubkey in goat_pubkeys)
 
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --pow 10 --tag t=LightningGoats {pubkey_part} wss://nostr.mutinywallet.com wss://relay.damus.io wss://relay.artx.market/ wss://nostr.mutinywallet.com/'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats {pubkey_part} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
 
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message)
 
     if event_type == "cyber_herd":
-        display_name = cyber_herd_item.get('display_name', '')
+        display_name = cyber_herd_item.get('display_name', 'anon')
         event_id = cyber_herd_item.get('event_id', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
@@ -99,20 +99,23 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
             nprofile = f"nostr:{nprofile}"
 
         message = template.format(name=nprofile, difference=difference, event_id=event_id)
-        message += f" {spots_remaining} spots available."
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --pow 10 --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;root" -p {pub_key} wss://nostr.mutinywallet.com wss://relay.damus.io wss://relay.artx.market/ wss://nostr.mutinywallet.com/'
+        
+        spots_info = ""
+        if spots_remaining > 1:
+            spots_info = f"⚡ {spots_remaining} more spots available. ⚡"
+        elif spots_remaining == 1:
+            spots_info = f"⚡ {spots_remaining} more spot available. ⚡"
 
+        message += spots_info
+
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" -p {pub_key} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
+        
         if display_name:
-            message = template.format(name=display_name, difference=difference)
-            
-            if spots_remaining > 1:
-                message += f" {spots_remaining} more spots available."
-            elif spots_remaining == 1:
-                message += f" {spots_remaining} more spot available."
-
+            message = template.format(name=display_name, difference=difference, event_id=event_id)
+            message += spots_info
 
     if event_type == "cyber_herd_treats":
-        display_name = cyber_herd_item.get('display_name', '')	
+        display_name = cyber_herd_item.get('display_name', '')
         event_id = cyber_herd_item.get('notified', '')
         pub_key = cyber_herd_item.get('pubkey', '')
         nprofile = cyber_herd_item.get('nprofile', '')
@@ -121,7 +124,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
             nprofile = f"nostr:{nprofile}"
 
         message = template.format(new_amount=new_amount, name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" --pow 10 --tag t=LightningGoats --tag e="{event_id};wss://relay.primal.net;reply" -p {pub_key} wss://nostr.mutinywallet.com wss://relay.damus.io wss://relay.artx.market/ wss://nostr.mutinywallet.com/'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;reply" -p {pub_key} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
 
         if display_name:
             message = template.format(new_amount=new_amount, name=display_name, difference=difference)
@@ -138,11 +141,14 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
 
         if process.returncode != 0:
             logger.error(f"Command failed with error: {stderr.decode()}")
+            return stderr.decode()
         else:
             logger.info(f"Command output: {stdout.decode()}")
             notified['id'] = extract_id_from_stdout(stdout.decode())
+            return stdout.decode()
 
+    command_output = None
     if command and event_type not in ["cyber_herd_info", "interface_info"]:
-        asyncio.create_task(execute_command(command))
+        command_output = await execute_command(command)
 
-    return message
+    return message, command_output
