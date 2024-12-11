@@ -1,9 +1,8 @@
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
-from googleapiclient.discovery import build
 from urllib.parse import quote
 from dotenv import load_dotenv
 import messaging
@@ -37,7 +36,6 @@ from tenacity import (
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
 PRICE = float(os.getenv('PRICE', 1.00))
-PAYMENT_PERCENTAGE = float(os.getenv('PAYMENT_PERCENTAGE', 1.00))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
 HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036ad4bb0dcb4b8c952230ab7b47ea52")
@@ -65,6 +63,16 @@ class AppState:
         self.balance = None
         self.trigger_amount = None
         self.lock = Lock()
+
+    async def set_daily_trigger_amount(self):
+        """Set the trigger amount for the day."""
+        try:
+            trigger_amount = await convert_to_sats(PRICE)
+            async with self.lock:
+                self.daily_trigger_amount = trigger_amount
+                logger.info(f"Daily trigger amount set to: {trigger_amount}")
+        except Exception as e:
+            logger.error(f"Failed to set daily trigger amount: {e}")
 
 app_state = AppState()
 
@@ -115,7 +123,7 @@ def load_env_vars(required_vars):
         raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
     return {var: os.getenv(var) for var in required_vars}
 
-required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'GOOGLE_API_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
+required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 config = load_env_vars(required_env_vars)
 
 # Define Retry Decorators
@@ -282,6 +290,9 @@ async def startup():
     global http_client
     http_client = httpx.AsyncClient(http2=True)
     
+    # Set the daily trigger amount on startup
+    await app_state.set_daily_trigger_amount()
+    
     # Create and start the WebSocket manager
     websocket_task = asyncio.create_task(websocket_manager.connect())
     connected = await websocket_manager.wait_for_connection(timeout=30)
@@ -319,11 +330,23 @@ async def startup():
 
     # Start the cache cleanup task
     asyncio.create_task(cleanup_cache())
+    
+# Scheduled task to reset the daily trigger amount
+@app.on_event("startup")
+async def schedule_daily_reset():
+    async def reset_trigger_amount():
+        while True:
+            now = datetime.utcnow()
+            # Calculate the time until midnight UTC
+            next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            sleep_seconds = (next_midnight - now).total_seconds()
+            await asyncio.sleep(sleep_seconds)
+            await app_state.set_daily_trigger_amount()
+
+    asyncio.create_task(reset_trigger_amount())
 
 @app.on_event("shutdown")
 async def shutdown():
-    await http_client.aclose()
-    await database.disconnect()
     await websocket_manager.disconnect()
 
 # Cache Management
@@ -601,15 +624,24 @@ async def fetch_btc_price():
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
-async def convert_to_sats(amount: float):
-    """Converts a USD amount to satoshis using the current BTC price."""
+async def convert_to_sats(amount: float, force_refresh=False):
     try:
-        btc_price = await fetch_btc_price()  # Retrieve BTC price from OpenHAB
-        amount_in_btc = amount / btc_price  # Convert USD amount to BTC
-        sats = amount_in_btc * 1e8  # Convert BTC to satoshis
-        return int(sats)
+        if not force_refresh:
+            cached_conversion = await cache.get(f'usd_to_sats_{amount}')
+            if cached_conversion is not None:
+                return cached_conversion
+
+        payload = {"from_": "usd", "amount": amount, "to": "sat"}
+        response = await http_client.post(f'{LNBITS_URL}/api/v1/conversion', json=payload)
+        response.raise_for_status()
+        sats = response.json()['sats']
+        await cache.set(f'usd_to_sats_{amount}', sats, ttl=300)
+        return sats
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error converting amount: {e}")
+        raise HTTPException(status_code=response.status_code, detail="Failed to convert amount")
     except Exception as e:
-        logger.error(f"Error converting amount to sats: {e}")
+        logger.error(f"Error converting amount: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
@@ -684,44 +716,11 @@ async def trigger_feeder():
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 # Helper Functions
-def get_youtube_client(api_key):
-    return build('youtube', 'v3', developerKey=api_key, cache_discovery=False)
-
-@http_retry
-async def get_live_broadcast_id(channel_id: str):
-    return False
-
-    try:
-        cached_video_id = await cache.get(f'live_video_{channel_id}')
-        if cached_video_id:
-            return cached_video_id
-
-        youtube = get_youtube_client(config['GOOGLE_API_KEY'])
-        request = youtube.search().list(
-            part="id,snippet",
-            channelId=channel_id,
-            type="video",
-            eventType="live"
-        )
-        response = request.execute()
-
-        if response['items']:
-            video_id = response['items'][0]['id']['videoId']
-            await cache.set(f'live_video_{channel_id}', video_id, ttl=3600)
-            return video_id
-        else:
-            raise HTTPException(status_code=404, detail="No live broadcast found")
-    except HTTPException as e:
-        logger.error(f"Failed to fetch live broadcast ID: {e.detail}")
-        raise e
-    except Exception as e:
-        logger.error(f"Failed to fetch live broadcast ID: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch live broadcast ID")
 
 @http_retry
 async def send_payment(balance: int):
     balance = balance * 1000
-    withdraw = int(round(balance * PAYMENT_PERCENTAGE) / 1000)
+    withdraw = int(balance / 1000)
     memo = 'Reset Herd Wallet'
     
     try:
@@ -739,6 +738,7 @@ async def send_payment(balance: int):
 @app.get("/balance")
 async def get_balance_route(force_refresh: bool = False):
     balance_value = await get_balance(force_refresh)
+    #todo: change to sats instead of millisats.
     return {"balance": balance_value}
 
 @app.post("/create-invoice/{amount}")
@@ -900,12 +900,9 @@ async def delete_cyber_herd(lud16: str):
 async def get_trigger_amount_route():
     try:
         async with app_state.lock:
-            if app_state.trigger_amount is not None:
-                return {"trigger_amount": app_state.trigger_amount}
-        trigger_amount = await convert_to_sats(PRICE)
-        async with app_state.lock:
-            app_state.trigger_amount = trigger_amount
-        return {"trigger_amount": trigger_amount}
+            if app_state.daily_trigger_amount is not None:
+                return {"trigger_amount": app_state.daily_trigger_amount}
+        raise HTTPException(status_code=500, detail="Daily trigger amount is not set.")
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -933,22 +930,6 @@ async def feeder_status():
     except Exception as e:
         logger.error(f"Error in /feeder_status route: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@app.get("/islive/{channel_id}")
-async def live_status(channel_id: str):
-    try:
-        cached_video_id = await cache.get(f'live_video_{channel_id}')
-        if cached_video_id:
-            return {'status': 'live', 'video_id': cached_video_id}
-
-        video_id = await get_live_broadcast_id(channel_id)
-        return {'status': 'live', 'video_id': video_id}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Failed to check live status: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
 @app.get("/messages", response_model=List[Message])
 async def get_messages_route():   
     try:
@@ -1048,21 +1029,21 @@ async def process_payment_data(payment_data):
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
 
-        # Process only positive payment amounts
-        if payment_amount <= 0:
-            logger.info("Payment amount is non-positive, skipping processing.")
-            return
-
         wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
         wallet_balance = payment_data.get('wallet_balance')
 
         async with app_state.lock:
             app_state.balance = wallet_balance
             app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
+        
+        # Process only positive payment amounts
+        if payment_amount <= 0:
+            logger.info("Payment amount is non-positive, skipping processing.")
+            return
 
         # Skip if feeder override is enabled
         if not await is_feeder_override_enabled():
-            if app_state.balance >= (app_state.trigger_amount - 5):
+            if app_state.balance >= (app_state.trigger_amount):
                 if await trigger_feeder():
                     status = await send_payment(app_state.balance)
                     if status['success']:
