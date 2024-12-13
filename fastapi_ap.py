@@ -64,15 +64,19 @@ class AppState:
         self.trigger_amount = None
         self.lock = Lock()
 
-    async def set_daily_trigger_amount(self):
-        """Set the trigger amount for the day."""
+    async def set_trigger_amount(self, amount: float):
+        """Set the trigger amount."""
+        async with self.lock:
+            self.trigger_amount = amount
+            logger.info(f"Trigger amount set to: {amount}")
+
+    async def initialize_trigger_amount(self):
+        """Calculate and set the initial trigger amount."""
         try:
-            trigger_amount = await convert_to_sats(PRICE)
-            async with self.lock:
-                self.daily_trigger_amount = trigger_amount
-                logger.info(f"Daily trigger amount set to: {trigger_amount}")
+            amount = await convert_to_sats(PRICE)
+            await self.set_trigger_amount(amount)
         except Exception as e:
-            logger.error(f"Failed to set daily trigger amount: {e}")
+            logger.error(f"Failed to initialize trigger amount: {e}")
 
 app_state = AppState()
 
@@ -115,6 +119,9 @@ class InvoiceRequest(BaseModel):
 class Message(BaseModel):
     content: str
 
+class PaymentRequest(BaseModel):
+    balance: int
+    
 # Environment and Configuration
 def load_env_vars(required_vars):
     load_dotenv()
@@ -291,7 +298,7 @@ async def startup():
     http_client = httpx.AsyncClient(http2=True)
     
     # Set the daily trigger amount on startup
-    await app_state.set_daily_trigger_amount()
+    await app_state.initialize_trigger_amount()
     
     # Create and start the WebSocket manager
     websocket_task = asyncio.create_task(websocket_manager.connect())
@@ -337,11 +344,10 @@ async def schedule_daily_reset():
     async def reset_trigger_amount():
         while True:
             now = datetime.utcnow()
-            # Calculate the time until midnight UTC
             next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             sleep_seconds = (next_midnight - now).total_seconds()
             await asyncio.sleep(sleep_seconds)
-            await app_state.set_daily_trigger_amount()
+            await app_state.initialize_trigger_amount()
 
     asyncio.create_task(reset_trigger_amount())
 
@@ -624,13 +630,8 @@ async def fetch_btc_price():
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
-async def convert_to_sats(amount: float, force_refresh=False):
+async def convert_to_sats(amount: float):
     try:
-        if not force_refresh:
-            cached_conversion = await cache.get(f'usd_to_sats_{amount}')
-            if cached_conversion is not None:
-                return cached_conversion
-
         payload = {"from_": "usd", "amount": amount, "to": "sat"}
         response = await http_client.post(f'{LNBITS_URL}/api/v1/conversion', json=payload)
         response.raise_for_status()
@@ -898,16 +899,11 @@ async def delete_cyber_herd(lud16: str):
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
-    try:
-        async with app_state.lock:
-            if app_state.daily_trigger_amount is not None:
-                return {"trigger_amount": app_state.daily_trigger_amount}
-        raise HTTPException(status_code=500, detail="Daily trigger amount is not set.")
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error retrieving trigger amount: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    async with app_state.lock:
+        if app_state.trigger_amount is None:
+            raise HTTPException(status_code=500, detail="Trigger amount is not set.")
+        return {"trigger_amount": app_state.trigger_amount}
+
 
 @app.get("/convert/{amount}")
 async def convert(amount: float):
@@ -986,6 +982,21 @@ async def reset_all_messages():
         logger.error(f"Error in /messages/reset route: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+@app.post("/send-payment")
+async def send_payment_route(payment_request: PaymentRequest):
+    """
+    API endpoint to send a payment using the send_payment function.
+    """
+    try:
+        result = await send_payment(payment_request.balance)
+        return result
+    except HTTPException as e:
+        logger.error(f"HTTPException occurred: {e.detail}")
+        raise HTTPException(status_code=500, detail="Failed to process payment request.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+
 @app.get("/cyberherd/spots_remaining")
 async def get_cyberherd_spots_remaining():
     try:
@@ -1034,7 +1045,7 @@ async def process_payment_data(payment_data):
 
         async with app_state.lock:
             app_state.balance = wallet_balance
-            app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
+            #app_state.trigger_amount = math.floor(wallet_fiat_rate * PRICE)
         
         # Process only positive payment amounts
         if payment_amount <= 0:
