@@ -1,11 +1,12 @@
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.websockets import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, validator
 from urllib.parse import quote
 from dotenv import load_dotenv
-import messaging
 import asyncio
 import httpx
 import json
@@ -31,6 +32,8 @@ from tenacity import (
     before_log,
     wait_fixed,
 )
+
+import messaging
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
@@ -64,13 +67,11 @@ class AppState:
         self.lock = Lock()
 
     async def set_trigger_amount(self, amount: float):
-        """Set the trigger amount."""
         async with self.lock:
             self.trigger_amount = amount
             logger.info(f"Trigger amount set to: {amount}")
 
     async def initialize_trigger_amount(self):
-        """Calculate and set the initial trigger amount."""
         try:
             amount = await convert_to_sats(PRICE)
             await self.set_trigger_amount(amount)
@@ -79,7 +80,10 @@ class AppState:
 
 app_state = AppState()
 
-# Pydantic models
+# Track connected WebSocket clients
+connected_clients: Set[WebSocket] = set()
+
+# Pydantic Models
 class HookData(BaseModel):
     payment_hash: str
     description: Optional[str] = None
@@ -109,22 +113,9 @@ class CyberHerdTreats(BaseModel):
     pubkey: str
     amount: int
 
-class InvoiceRequest(BaseModel):
-    amount: int
-    memo: str
-    key: Optional[str] = None
-
-class Message(BaseModel):
-    id: int
-    content: str
-    
-class DeleteMessagesRequest(BaseModel):
-    ids: List[int]
-
 class PaymentRequest(BaseModel):
     balance: int
 
-# Environment and Configuration
 def load_env_vars(required_vars):
     load_dotenv()
     missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -135,10 +126,16 @@ def load_env_vars(required_vars):
 required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 config = load_env_vars(required_env_vars)
 
-# Define Retry Decorators
+#Cors middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from tenacity import AsyncRetrying
 
-# Retry decorator for HTTP requests using httpx
 http_retry = retry(
     reraise=True,
     stop=stop_after_attempt(5),
@@ -146,7 +143,6 @@ http_retry = retry(
     retry=retry_if_exception_type(httpx.RequestError)
 )
 
-# Retry decorator for WebSocket connections
 websocket_retry = retry(
     reraise=True,
     stop=stop_after_attempt(None),
@@ -161,7 +157,6 @@ websocket_retry = retry(
     before=before_log(logger, logging.WARNING)
 )
 
-# Retry decorator for Database operations
 db_retry = retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -169,7 +164,6 @@ db_retry = retry(
     retry=retry_if_exception_type((Exception,))
 )
 
-# WebSockets
 class WebSocketManager:
     def __init__(self, uri: str, logger: logging.Logger, max_retries: Optional[int] = None):
         self.uri = uri
@@ -241,7 +235,6 @@ class WebSocketManager:
                     self.logger.error(f"Failed to decode WebSocket message: {e}")
                 except Exception as e:
                     self.logger.error(f"Error processing message: {e}")
-                    # Continue listening even if processing fails
         except (ConnectionClosedError, ConnectionClosedOK) as e:
             self.logger.warning(f"WebSocket connection closed during listen: {e}")
             raise
@@ -282,30 +275,30 @@ class WebSocketManager:
     async def run(self):
         await self.connect()
 
-# Initialize WebSocket Manager
 websocket_manager = WebSocketManager(
     uri=HERD_WEBSOCKET,
     logger=logger,
     max_retries=5
 )
 
-# Database
 database = Database('sqlite:///cyberherd.db')
 
 @app.on_event("startup")
 async def startup():
+    # Initialize HTTP client
     global http_client
     http_client = httpx.AsyncClient(http2=True)
-    
-    # Set the daily trigger amount on startup
+
+    # Initialize application state
     await app_state.initialize_trigger_amount()
-    
-    # Create and start the WebSocket manager
+
+    # Start WebSocket manager
     websocket_task = asyncio.create_task(websocket_manager.connect())
     connected = await websocket_manager.wait_for_connection(timeout=30)
     if not connected:
         logger.warning("Initial WebSocket connection attempt timed out")
-    
+
+    # Connect to database and create tables (no 'messages' table anymore)
     await database.connect()
     await database.execute('''
         CREATE TABLE IF NOT EXISTS cyber_herd (
@@ -321,13 +314,6 @@ async def startup():
         )
     ''')
     await database.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            content TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    await database.execute('''
         CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -335,27 +321,24 @@ async def startup():
         )
     ''')
 
-    # Start the cache cleanup task
+    # Start cache cleanup task
     asyncio.create_task(cleanup_cache())
-    
-# Scheduled task to reset the daily trigger amount
-@app.on_event("startup")
+
+    # Start daily reset task
+    asyncio.create_task(schedule_daily_reset())
+
+    # Start periodic informational message task
+    asyncio.create_task(periodic_informational_messages())
+
+
 async def schedule_daily_reset():
-    async def reset_trigger_amount():
-        while True:
-            now = datetime.utcnow()
-            next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            sleep_seconds = (next_midnight - now).total_seconds()
-            await asyncio.sleep(sleep_seconds)
-            await app_state.initialize_trigger_amount()
+    while True:
+        now = datetime.utcnow()
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        sleep_seconds = (next_midnight - now).total_seconds()
+        await asyncio.sleep(sleep_seconds)
+        await app_state.initialize_trigger_amount()
 
-    asyncio.create_task(reset_trigger_amount())
-
-@app.on_event("shutdown")
-async def shutdown():
-    await websocket_manager.disconnect()
-
-# Cache Management
 class DatabaseCache:
     def __init__(self, db):
         self.db = db
@@ -389,7 +372,7 @@ cache = DatabaseCache(database)
 
 async def cleanup_cache():
     while True:
-        await asyncio.sleep(1800)  # Run cleanup every 30 minutes
+        await asyncio.sleep(1800)
         try:
             current_time = time.time()
             query = "DELETE FROM cache WHERE expires_at < :current_time"
@@ -397,7 +380,32 @@ async def cleanup_cache():
         except Exception as e:
             logger.error(f"Error cleaning up cache: {e}")
 
-# Database Functions
+async def send_messages_to_clients(message: str):
+    """Send a given message to all connected WebSocket clients."""
+    if not message:
+        logger.warning("Attempted to send an empty message. Skipping.")
+        return
+
+    if connected_clients:
+        logger.info(f"Broadcasting message to {len(connected_clients)} clients: {message}")
+        for client in connected_clients.copy():
+            try:
+                await client.send_text(message)
+            except Exception as e:
+                logger.warning(f"Failed to send message to client: {e}")
+                connected_clients.remove(client)
+    else:
+        logger.debug("No connected clients to send messages to.")
+
+async def periodic_informational_messages():
+    """Send an informational message via WebSockets with a 40% chance every minute."""
+    while True:
+        await asyncio.sleep(60)
+        if random.random() < 0.4:  # 40% chance
+            # Use the messaging.make_messages to generate the "interface_info" message
+            message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
+            await send_messages_to_clients(message)
+
 @db_retry
 async def get_cyber_herd_list() -> List[dict]:
     try:
@@ -444,54 +452,6 @@ async def update_cyber_herd_list(new_data: List[dict], reset=False):
         logger.error(f"Error updating cyber herd list: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@db_retry
-async def update_message_in_db(new_message: str) -> int:
-    try:
-        # Insert message and get the last inserted ID
-        query = "INSERT INTO messages (content) VALUES (:content)"
-        last_record_id = await database.execute(query, values={'content': new_message})
-        await database.execute("DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY timestamp DESC LIMIT 10)")
-        return last_record_id
-    except Exception as e:
-        logger.error(f"Error updating messages in database: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@db_retry
-async def retrieve_messages() -> List[Dict]:
-    try:
-        query = "SELECT id, content FROM messages ORDER BY timestamp DESC"
-        rows = await database.fetch_all(query)
-        return [{"id": row["id"], "content": row["content"]} for row in rows]
-    except Exception as e:
-        logger.error(f"Error retrieving messages from database: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@db_retry
-async def get_message_by_id(message_id: int) -> Optional[Dict]:
-    try:
-        query = "SELECT id, content FROM messages WHERE id = :id"
-        row = await database.fetch_one(query, values={"id": message_id})
-        if row:
-            return {"id": row["id"], "content": row["content"]}
-        return None
-    except Exception as e:
-        logger.error(f"Error retrieving message by ID: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-        
-@db_retry
-async def delete_messages_by_ids(ids: List[int]) -> int:
-    try:
-        query = "DELETE FROM messages WHERE id = :id"
-        values = [{"id": message_id} for message_id in ids]
-        await database.execute_many(query, values=values)
-        # If needed, you could verify how many rows were actually deleted by querying again.
-        # For simplicity, we'll assume all requested messages were deleted.
-        return len(ids)
-    except Exception as e:
-        logger.error(f"Error deleting messages: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-# HTTP Client and External Service Interaction
 @http_retry
 async def fetch_cyberherd_targets():
     url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
@@ -585,7 +545,9 @@ async def notify_new_members(new_members, difference, current_herd_size):
     for item_dict in new_members:
         spots_remaining = MAX_HERD_SIZE - current_herd_size
         try:
-            message_content, command_output = await messaging.make_messages(
+            # Instead of storing or retrieving from DB, just send a message via WebSocket
+            # This uses the messaging.make_messages function, which you must still have implemented
+            message_content, _ = await messaging.make_messages(
                 config['NOS_SEC'],
                 0,
                 difference,
@@ -593,13 +555,10 @@ async def notify_new_members(new_members, difference, current_herd_size):
                 item_dict,
                 spots_remaining
             )
-            
-            await update_message_in_db(message_content)
+            await send_messages_to_clients(message_content)
 
-            # Parse the command output to extract the note_id
-            command_output_json = json.loads(command_output)
+            command_output_json = json.loads(_)
             note_id = command_output_json.get("id")
-
             if note_id:
                 update_query = """
                 UPDATE cyber_herd
@@ -741,7 +700,50 @@ async def trigger_feeder():
         logger.error(f"Error triggering the feeder rule: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-# Helper Functions
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception)
+)
+async def process_payment_data(payment_data):
+    try:
+        payment = payment_data.get('payment', {})
+        payment_amount = payment.get('amount', 0)
+
+        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
+        wallet_balance = payment_data.get('wallet_balance')
+
+        async with app_state.lock:
+            app_state.balance = wallet_balance
+        
+        if payment_amount > 0 and not await is_feeder_override_enabled():
+            if app_state.balance >= app_state.trigger_amount:
+                if await trigger_feeder():
+                    status = await send_payment(app_state.balance)
+                    if status['success']:
+                        # Just send a message to websockets
+                        message, _ = await messaging.make_messages(
+                            config['NOS_SEC'],
+                            int(payment_amount / 1000), 0, "feeder_triggered"
+                        )
+                        await send_messages_to_clients(message)
+            else:
+                difference = round(app_state.trigger_amount - app_state.balance)
+                if (payment_amount / 1000) >= 10:
+                    message, _ = await messaging.make_messages(
+                        config['NOS_SEC'], 
+                        int(payment_amount / 1000), 
+                        difference, 
+                        "sats_received"
+                    )
+                    await send_messages_to_clients(message)
+        else:
+            logger.info("Feeder override is ON or payment amount is non-positive. Skipping.")
+    except Exception as e:
+        logger.error(f"Error processing payment data: {e}")
+        raise
+
 @http_retry
 async def send_payment(balance: int):
     balance = balance * 1000
@@ -759,7 +761,6 @@ async def send_payment(balance: int):
         logger.error(f"Failed to send payment: {e}")
         return {"success": False, "message": "Failed to send payment"}
 
-# API Routes
 @app.get("/balance")
 async def get_balance_route(force_refresh: bool = False):
     balance_value = await get_balance(force_refresh)
@@ -944,86 +945,6 @@ async def feeder_status():
         logger.error(f"Error in /feeder_status route: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@app.get("/messages", response_model=List[Message])
-async def get_messages_route():
-    try:
-        messages = await retrieve_messages()
-        formatted_messages = [Message(id=msg["id"], content=msg["content"]) for msg in messages if isinstance(msg["content"], str)]
-        return formatted_messages
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /messages route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@app.post("/messages/cyberherd_treats", response_model=Message)
-async def handle_cyberherd_treats(data: CyberHerdTreats):
-    try:
-        pubkey = data.pubkey
-        amount = data.amount
-        cyber_herd_list = await get_cyber_herd_list()
-        cyber_herd_dict = {item['pubkey']: item for item in cyber_herd_list}
-        
-        if pubkey not in cyber_herd_dict:
-            raise HTTPException(status_code=400, detail="Invalid pubkey")
-
-        message_data, _ = await messaging.make_messages(
-            config['NOS_SEC'], 
-            amount, 
-            0, 
-            "cyber_herd_treats", 
-            cyber_herd_dict[pubkey]
-        )
-
-        last_inserted_id = await update_message_in_db(message_data)
-        created_message = await get_message_by_id(last_inserted_id)
-        
-        if not created_message:
-            raise HTTPException(status_code=500, detail="Failed to retrieve created message")
-
-        return Message(id=created_message["id"], content=created_message["content"])
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /messages/cyberherd_treats route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@app.get("/messages/info")
-async def create_info_message():
-    try:
-        message_data, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
-        await update_message_in_db(message_data)
-        messages = await retrieve_messages()
-        return [Message(id=msg["id"], content=msg["content"]) for msg in messages]
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /messages/info route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@app.post("/messages/bulk_delete")
-async def bulk_delete_messages(req: DeleteMessagesRequest):
-    try:
-        count_deleted = await delete_messages_by_ids(req.ids)
-        return {"status": "success", "deleted_count": count_deleted}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /messages/bulk_delete route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@app.get("/messages/reset")
-async def reset_all_messages():
-    try:
-        await database.execute("DELETE FROM messages")
-        return {"status": "success", "message": "All messages have been reset."}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /messages/reset route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
 @app.post("/send-payment")
 async def send_payment_route(payment_request: PaymentRequest):
     try:
@@ -1050,7 +971,27 @@ async def get_cyberherd_spots_remaining():
         logger.error(f"Error retrieving remaining CyberHerd spots: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-# Error Handling
+@app.get("/ws")
+async def redirect_ws():
+    return {"message": "Redirecting to /ws/"}
+
+@app.websocket("/ws/")
+async def websocket_endpoint(websocket: WebSocket):
+    logger.debug(f"WebSocket Headers: {websocket.headers}")
+    await websocket.accept()
+    connected_clients.add(websocket)
+    logger.info(f"Client connected. Total clients: {len(connected_clients)}")
+
+    try:
+        while True:
+            # We don't process client messages here currently, but we could if needed
+            await websocket.receive_text()
+    except Exception as e:
+        logger.warning(f"WebSocket connection error: {e}")
+    finally:
+        connected_clients.remove(websocket)
+        logger.info(f"Client disconnected. Total clients: {len(connected_clients)}")
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     logger.error(f"HTTPException: {exc.detail}")
@@ -1067,52 +1008,3 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal Server Error"}
     )
 
-# Payment Processing Function
-@retry(
-    reraise=True,
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(Exception)
-)
-async def process_payment_data(payment_data):
-    try:
-        payment = payment_data.get('payment', {})
-        payment_amount = payment.get('amount', 0)
-
-        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
-        wallet_balance = payment_data.get('wallet_balance')
-
-        async with app_state.lock:
-            app_state.balance = wallet_balance
-        
-        # Process only positive payment amounts
-        if payment_amount <= 0:
-            logger.info("Payment amount is non-positive, skipping processing.")
-            return
-
-        # Skip if feeder override is enabled
-        if not await is_feeder_override_enabled():
-            if app_state.balance >= (app_state.trigger_amount):
-                if await trigger_feeder():
-                    status = await send_payment(app_state.balance)
-                    if status['success']:
-                        message, _ = await messaging.make_messages(
-                            config['NOS_SEC'],
-                            int(payment_amount / 1000), 0, "feeder_triggered"
-                        )
-                        await update_message_in_db(message)
-            else:
-                difference = round(app_state.trigger_amount - app_state.balance)
-                if (payment_amount / 1000) >= 10:
-                    message, _ = await messaging.make_messages(
-                        config['NOS_SEC'], 
-                        int(payment_amount / 1000), 
-                        difference, 
-                        "sats_received"
-                    )
-                    await update_message_in_db(message)
-        else:
-            logger.info("Feeder override is ON, skipping feeder logic.")
-    except Exception as e:
-        logger.error(f"Error processing payment data: {e}")
-        raise
