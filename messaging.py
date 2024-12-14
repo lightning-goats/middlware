@@ -85,7 +85,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
         message = template.format(new_amount=new_amount, goat_name=goat_nprofiles, difference_message=difference_message)
         pubkey_part = ' '.join(f'-p {pubkey}' for pubkey in goat_pubkeys)
 
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats {pubkey_part} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats {pubkey_part} wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
 
         message = template.format(new_amount=new_amount, goat_name=goat_names, difference_message=difference_message)
 
@@ -108,7 +108,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
 
         message += spots_info
 
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" -p {pub_key} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" -p {pub_key} wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
         
         if display_name:
             message = template.format(name=display_name, difference=difference, event_id=event_id)
@@ -124,7 +124,7 @@ async def make_messages(nos_sec: str, new_amount: float, difference: float, even
             nprofile = f"nostr:{nprofile}"
 
         message = template.format(new_amount=new_amount, name=nprofile, difference=difference)
-        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;reply" -p {pub_key} ws://127.0.0.1:3002/nostrclient/api/v1/relay'
+        command = f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}"  --tag t=LightningGoats --tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;reply" -p {pub_key} wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
 
         if display_name:
             message = template.format(new_amount=new_amount, name=display_name, difference=difference)
