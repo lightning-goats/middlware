@@ -34,6 +34,8 @@ from tenacity import (
 )
 
 import messaging
+from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile
+
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
@@ -230,7 +232,8 @@ class WebSocketManager:
                 try:
                     self.logger.debug(f"Received message: {message}")
                     payment_data = json.loads(message)
-                    await process_payment_data(payment_data)
+                    background_tasks = BackgroundTasks()
+                    await process_payment_data(payment_data, background_tasks)
                 except json.JSONDecodeError as e:
                     self.logger.error(f"Failed to decode WebSocket message: {e}")
                 except Exception as e:
@@ -338,6 +341,10 @@ async def schedule_daily_reset():
         sleep_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(sleep_seconds)
         await app_state.initialize_trigger_amount()
+        
+        if app_state.balance >= app_state.trigger_amount:
+                await send_payment(app_state.balance)
+                        
 
 class DatabaseCache:
     def __init__(self, db):
@@ -405,52 +412,6 @@ async def periodic_informational_messages():
             # Use the messaging.make_messages to generate the "interface_info" message
             message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
             await send_messages_to_clients(message)
-
-@db_retry
-async def get_cyber_herd_list() -> List[dict]:
-    try:
-        query = "SELECT * FROM cyber_herd"
-        rows = await database.fetch_all(query)
-        result = []
-        for row in rows:
-            row_dict = dict(row)
-            try:
-                row_dict['kinds'] = json.loads(row_dict['kinds']) if isinstance(row_dict['kinds'], str) else row_dict['kinds']
-            except json.JSONDecodeError:
-                row_dict['kinds'] = []
-            result.append(row_dict)
-        return result
-    except Exception as e:
-        logger.error(f"Error retrieving cyber herd list: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@db_retry
-async def update_cyber_herd_list(new_data: List[dict], reset=False):
-    try:
-        if reset:
-            await database.execute("DELETE FROM cyber_herd")
-            return
-
-        query = '''
-            INSERT OR REPLACE INTO cyber_herd
-            (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
-            VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts)
-        '''
-        for item in new_data:
-            await database.execute(query, values={
-                'pubkey': item['pubkey'],
-                'display_name': item.get('display_name'),
-                'event_id': item.get('event_id'),
-                'note': item.get('note'),
-                'kinds': json.dumps(item.get('kinds', [])),
-                'nprofile': item.get('nprofile'),
-                'lud16': item.get('lud16'),
-                'notified': item.get('notified'),
-                'payouts': item.get('payouts', 0.0)
-            })
-    except Exception as e:
-        logger.error(f"Error updating cyber herd list: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
 async def fetch_cyberherd_targets():
@@ -543,13 +504,14 @@ async def update_cyberherd_targets(targets):
 
 async def notify_new_members(new_members, difference, current_herd_size):
     for item_dict in new_members:
-        spots_remaining = MAX_HERD_SIZE - current_herd_size
         try:
-            # Instead of storing or retrieving from DB, just send a message via WebSocket
-            # This uses the messaging.make_messages function, which you must still have implemented
-            message_content, _ = await messaging.make_messages(
+            # Calculate spots remaining dynamically
+            spots_remaining = MAX_HERD_SIZE - current_herd_size
+
+            # Generate a message using `messaging.make_messages`
+            message_content, raw_command_output = await messaging.make_messages(
                 config['NOS_SEC'],
-                0,
+                0,  # Amount placeholder
                 difference,
                 "cyber_herd",
                 item_dict,
@@ -557,8 +519,15 @@ async def notify_new_members(new_members, difference, current_herd_size):
             )
             await send_messages_to_clients(message_content)
 
-            command_output_json = json.loads(_)
-            note_id = command_output_json.get("id")
+            # Parse raw_command_output for the note_id
+            try:
+                command_output_json = json.loads(raw_command_output)
+                note_id = command_output_json.get("id")
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON from messaging.make_messages: {raw_command_output}")
+                continue
+
+            # Update the database with the note_id if available
             if note_id:
                 update_query = """
                 UPDATE cyber_herd
@@ -572,8 +541,9 @@ async def notify_new_members(new_members, difference, current_herd_size):
                 logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
             else:
                 logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
+
         except Exception as e:
-            logger.exception(f"Error while notifying and updating for pubkey: {item_dict['pubkey']}")
+            logger.exception(f"Error while notifying and updating for pubkey: {item_dict.get('pubkey', 'unknown')}")
 
 @http_retry
 async def get_balance(force_refresh=False):
@@ -706,7 +676,8 @@ async def trigger_feeder():
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(Exception)
 )
-async def process_payment_data(payment_data):
+
+async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
     try:
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
@@ -716,8 +687,79 @@ async def process_payment_data(payment_data):
 
         async with app_state.lock:
             app_state.balance = wallet_balance
-        
-        if payment_amount > 0 and not await is_feeder_override_enabled():
+
+        # Check for Nostr data and handle CyberHerd addition
+        nostr_data_raw = payment.get('extra', {}).get('nostr')
+        zap_processed = False  # Track if zap-specific logic is processed
+
+        if nostr_data_raw and payment_amount >= 21000:  # Amount >= 21 sats
+            try:
+                nostr_data = json.loads(nostr_data_raw)
+                pubkey = nostr_data.get('pubkey')
+                note = nostr_data.get('id')  # Set 'note' to the zap event's ID
+                kinds = [9734]  # Example: Assigning kind 9734 for now
+
+                # Extract the 'e' tag (zapped note ID)
+                event_id = next((tag[1] for tag in nostr_data.get('tags', []) if tag[0] == 'e'), None)
+
+                if pubkey and event_id:
+                    # Fetch metadata for the pubkey
+                    metadata_fetcher = MetadataFetcher()
+                    metadata = await metadata_fetcher.lookup_metadata(pubkey)
+
+                    if metadata:
+                        lud16 = metadata.get('lud16')
+                        nip05 = metadata.get('nip05')
+                        display_name = metadata.get('display_name', 'Anon')
+
+                        # Verify lud16 and nip05
+                        is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
+                        is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
+
+                        if not is_valid_lud16 or not is_valid_nip05:
+                            logger.warning(
+                                f"Record rejected for pubkey {pubkey}: "
+                                f"Valid lud16={is_valid_lud16}, Valid nip05={is_valid_nip05}"
+                            )
+                        else:
+                            nprofile = await generate_nprofile(pubkey)
+                            if not nprofile:
+                                logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
+                            else:
+                                logger.info(f"Generated nprofile: {nprofile}")
+
+                                # Create CyberHerdData instance
+                                new_member_data = CyberHerdData(
+                                    display_name=display_name,
+                                    event_id=event_id,  # Set to the zapped note ID
+                                    note=note,          # Set to the zap event's ID
+                                    kinds=kinds,
+                                    pubkey=pubkey,
+                                    nprofile=nprofile,
+                                    lud16=lud16,
+                                    notified=None,
+                                    payouts=0.0
+                                )
+
+                                # Call update_cyber_herd with the new member
+                                result = await update_cyber_herd([new_member_data], background_tasks)
+
+                                if result.get("status") == "success":
+                                    logger.info(f"Added new member to CyberHerd: {pubkey}")
+                                else:
+                                    logger.warning(f"Failed to add new member to CyberHerd: {pubkey}")
+                            zap_processed = True
+                    else:
+                        logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
+                else:
+                    logger.warning("Missing pubkey or event_id in Nostr data. Processing as a normal payment.")
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON in Nostr data.")
+            except Exception as e:
+                logger.error(f"Error processing Nostr data: {e}")
+
+        # Existing logic for feeder and payment processing
+        if not zap_processed and payment_amount > 0 and not await is_feeder_override_enabled():
             if app_state.balance >= app_state.trigger_amount:
                 if await trigger_feeder():
                     status = await send_payment(app_state.balance)
@@ -791,13 +833,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
-        balance = float(await get_balance(True)) / 1000
-        trigger = await get_trigger_amount_route()
-        difference = round(trigger['trigger_amount'] - balance)
-
-        initial_targets = await fetch_cyberherd_targets()
-        existing_wallets = {item['wallet']: item for item in initial_targets}
-
         targets_to_create = []
         new_members = []
 
@@ -805,6 +840,7 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             item_dict = item.dict()
             pubkey = item_dict['pubkey']
 
+            # Check if the record already exists
             check_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE pubkey = :pubkey"
             result = await database.fetch_one(check_query, values={"pubkey": pubkey})
 
@@ -813,7 +849,7 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                 item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
                 new_members.append(item_dict)
 
-                if item_dict['lud16'] not in existing_wallets:
+                if item_dict['lud16']:
                     targets_to_create.append({
                         'wallet': item_dict['lud16'],
                         'alias': item_dict['pubkey'],
@@ -829,13 +865,12 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             await database.execute_many(insert_query, new_members)
 
         if targets_to_create:
-            targets = await create_cyberherd_targets(targets_to_create, initial_targets)
+            targets = await create_cyberherd_targets(targets_to_create, [])
             if targets:
                 await update_cyberherd_targets(targets)
 
-        background_tasks.add_task(notify_new_members, new_members, difference, current_herd_size)
+        background_tasks.add_task(notify_new_members, new_members, None, current_herd_size)
         return {"status": "success", "new_members_added": len(new_members)}
-
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -845,38 +880,42 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
     try:
-        return await get_cyber_herd_list()
-    except HTTPException as e:
-        raise e
+        query = "SELECT * FROM cyber_herd"
+        rows = await database.fetch_all(query)
+        return rows
     except Exception as e:
-        logger.error(f"Error in /get_cyber_herd route: {e}")
+        logger.error(f"Error retrieving cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
     try:
-        await update_cyber_herd_list([], reset=True)
+        # Clear the `cyber_herd` table
+        await database.execute("DELETE FROM cyber_herd")
+        logger.info("CyberHerd table cleared successfully.")
 
+        # Reset LNBits targets
         headers = {
             'accept': 'application/json',
             'X-API-KEY': config['CYBERHERD_KEY']
         }
-        url = f"{LNBITS_URL}/splitpayments/api/v1/targets?api-key={config['CYBERHERD_KEY']}"
+        url = f"{LNBITS_URL}/splitpayments/api/v1/targets"
 
+        # Delete all existing targets
         response = await http_client.delete(url, headers=headers)
         response.raise_for_status()
         logger.info("Existing CyberHerd targets deleted successfully.")
 
+        # Add predefined wallet target with 100% allocation
         predefined_wallet = {
             'wallet': PREDEFINED_WALLET_ADDRESS,
             'alias': PREDEFINED_WALLET_ALIAS,
             'percent': PREDEFINED_WALLET_PERCENT_RESET
         }
-
         new_targets = {"targets": [predefined_wallet]}
 
         create_response = await http_client.put(
-            f'{LNBITS_URL}/splitpayments/api/v1/targets',
+            url,
             headers={
                 'accept': 'application/json',
                 'X-API-KEY': config['CYBERHERD_KEY'],
@@ -897,18 +936,26 @@ async def reset_cyber_herd():
         raise HTTPException(status_code=500, detail="HTTP request to CyberHerd API failed.")
     except Exception as e:
         logger.error(f"Error resetting CyberHerd: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error.")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.delete("/cyber_herd/delete/{lud16}")
 async def delete_cyber_herd(lud16: str):
     try:
         logger.info(f"Attempting to delete record with lud16: {lud16}")
-        query = "DELETE FROM cyber_herd WHERE lud16 = :lud16"
-        result = await database.execute(query, values={'lud16': lud16})
-        if result == 0:
+
+        # Check if the record exists in the database
+        select_query = "SELECT * FROM cyber_herd WHERE lud16 = :lud16"
+        record = await database.fetch_one(select_query, values={"lud16": lud16})
+
+        if not record:
             logger.warning(f"No record found with lud16: {lud16}")
             raise HTTPException(status_code=404, detail="Record not found")
+
+        # Delete the record from the cyber_herd table
+        delete_query = "DELETE FROM cyber_herd WHERE lud16 = :lud16"
+        await database.execute(delete_query, values={"lud16": lud16})
         logger.info(f"Record with lud16 {lud16} deleted successfully.")
+
         return {"status": "success", "message": f"Record with lud16 {lud16} deleted successfully."}
     except HTTPException as e:
         raise e
@@ -1007,4 +1054,3 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal Server Error"}
     )
-
