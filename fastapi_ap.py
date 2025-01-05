@@ -34,7 +34,7 @@ from tenacity import (
 )
 
 import messaging
-from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile
+from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag
 
 
 # Configuration and Constants
@@ -46,7 +46,8 @@ HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036a
 PREDEFINED_WALLET_ADDRESS = 'bolverker@strike.me'
 PREDEFINED_WALLET_ALIAS = 'Bolverker'
 PREDEFINED_WALLET_PERCENT_RESET = 100
-PREDEFINED_WALLET_PERCENT_DEFAULT = 80
+PREDEFINED_WALLET_PERCENT_DEFAULT = 90
+TRIGGER_AMOUNT_SATS = 1000
 
 # Logging Configuration
 logging.basicConfig(
@@ -65,20 +66,7 @@ app = FastAPI()
 class AppState:
     def __init__(self):
         self.balance = None
-        self.trigger_amount = None
         self.lock = Lock()
-
-    async def set_trigger_amount(self, amount: float):
-        async with self.lock:
-            self.trigger_amount = amount
-            logger.info(f"Trigger amount set to: {amount}")
-
-    async def initialize_trigger_amount(self):
-        try:
-            amount = await convert_to_sats(PRICE)
-            await self.set_trigger_amount(amount)
-        except Exception as e:
-            logger.error(f"Failed to initialize trigger amount: {e}")
 
 app_state = AppState()
 
@@ -340,10 +328,9 @@ async def schedule_daily_reset():
         next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         sleep_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(sleep_seconds)
-        await app_state.initialize_trigger_amount()
         
-        if app_state.balance >= app_state.trigger_amount:
-                await send_payment(app_state.balance)
+        if app_state.balance and app_state.balance >= TRIGGER_AMOUNT_SATS:
+            await send_payment(app_state.balance)
                         
 
 class DatabaseCache:
@@ -690,9 +677,9 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 
         # Check for Nostr data and handle CyberHerd addition
         nostr_data_raw = payment.get('extra', {}).get('nostr')
-        zap_processed = False  # Track if zap-specific logic is processed
+        zap_matched_cyberherd = False  # Track if zap matches CyberHerd tag
 
-        if nostr_data_raw and payment_amount >= 21000:  # Amount >= 21 sats
+        if nostr_data_raw and payment_amount >= 21000:
             try:
                 nostr_data = json.loads(nostr_data_raw)
                 pubkey = nostr_data.get('pubkey')
@@ -703,54 +690,58 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                 event_id = next((tag[1] for tag in nostr_data.get('tags', []) if tag[0] == 'e'), None)
 
                 if pubkey and event_id:
-                    # Fetch metadata for the pubkey
-                    metadata_fetcher = MetadataFetcher()
-                    metadata = await metadata_fetcher.lookup_metadata(pubkey)
+                    # Check for CyberHerd tag using the module function
+                    if await check_cyberherd_tag(event_id):
+                        zap_matched_cyberherd = True
+                        # Fetch metadata for the pubkey
+                        metadata_fetcher = MetadataFetcher()
+                        metadata = await metadata_fetcher.lookup_metadata(pubkey)
 
-                    if metadata:
-                        lud16 = metadata.get('lud16')
-                        nip05 = metadata.get('nip05')
-                        display_name = metadata.get('display_name', 'Anon')
+                        if metadata:
+                            lud16 = metadata.get('lud16')
+                            nip05 = metadata.get('nip05')
+                            display_name = metadata.get('display_name', 'Anon')
 
-                        # Verify lud16 and nip05
-                        is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
-                        is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
+                            # Verify lud16 and nip05
+                            is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
+                            is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
 
-                        if not is_valid_lud16 or not is_valid_nip05:
-                            logger.warning(
-                                f"Record rejected for pubkey {pubkey}: "
-                                f"Valid lud16={is_valid_lud16}, Valid nip05={is_valid_nip05}"
-                            )
-                        else:
-                            nprofile = await generate_nprofile(pubkey)
-                            if not nprofile:
-                                logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
-                            else:
-                                logger.info(f"Generated nprofile: {nprofile}")
-
-                                # Create CyberHerdData instance
-                                new_member_data = CyberHerdData(
-                                    display_name=display_name,
-                                    event_id=event_id,  # Set to the zapped note ID
-                                    note=note,          # Set to the zap event's ID
-                                    kinds=kinds,
-                                    pubkey=pubkey,
-                                    nprofile=nprofile,
-                                    lud16=lud16,
-                                    notified=None,
-                                    payouts=0.0
+                            if not is_valid_lud16 or not is_valid_nip05:
+                                logger.warning(
+                                    f"Record rejected for pubkey {pubkey}: "
+                                    f"Valid lud16={is_valid_lud16}, Valid nip05={is_valid_nip05}"
                                 )
-
-                                # Call update_cyber_herd with the new member
-                                result = await update_cyber_herd([new_member_data], background_tasks)
-
-                                if result.get("status") == "success":
-                                    logger.info(f"Added new member to CyberHerd: {pubkey}")
+                            else:
+                                nprofile = await generate_nprofile(pubkey)
+                                if not nprofile:
+                                    logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
                                 else:
-                                    logger.warning(f"Failed to add new member to CyberHerd: {pubkey}")
-                            zap_processed = True
+                                    logger.info(f"Generated nprofile: {nprofile}")
+
+                                    # Create CyberHerdData instance
+                                    new_member_data = CyberHerdData(
+                                        display_name=display_name,
+                                        event_id=event_id,  # Set to the zapped note ID
+                                        note=note,          # Set to the zap event's ID
+                                        kinds=kinds,
+                                        pubkey=pubkey,
+                                        nprofile=nprofile,
+                                        lud16=lud16,
+                                        notified=None,
+                                        payouts=0.0
+                                    )
+
+                                    # Call update_cyber_herd with the new member
+                                    result = await update_cyber_herd([new_member_data], background_tasks)
+
+                                    if result.get("status") == "success":
+                                        logger.info(f"Added new member to CyberHerd: {pubkey}")
+                                    else:
+                                        logger.warning(f"Failed to add new member to CyberHerd: {pubkey}")
+                        else:
+                            logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
                     else:
-                        logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
+                        logger.info(f"No 'CyberHerd' tag found for event_id: {event_id}")
                 else:
                     logger.warning("Missing pubkey or event_id in Nostr data. Processing as a normal payment.")
             except json.JSONDecodeError:
@@ -758,20 +749,22 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
             except Exception as e:
                 logger.error(f"Error processing Nostr data: {e}")
 
-        # Existing logic for feeder and payment processing
-        if not zap_processed and payment_amount > 0 and not await is_feeder_override_enabled():
-            if app_state.balance >= app_state.trigger_amount:
+        # Check for feeder trigger. (always checked regardless)
+        if payment_amount > 0 and not await is_feeder_override_enabled():
+            if app_state.balance >= TRIGGER_AMOUNT_SATS:
                 if await trigger_feeder():
                     status = await send_payment(app_state.balance)
                     if status['success']:
-                        # Just send a message to websockets
+                        # Send a message to websockets
                         message, _ = await messaging.make_messages(
                             config['NOS_SEC'],
                             int(payment_amount / 1000), 0, "feeder_triggered"
                         )
                         await send_messages_to_clients(message)
-            else:
-                difference = round(app_state.trigger_amount - app_state.balance)
+
+            # Execute "sats_received" logic for non-zaps or zaps without CyberHerd match
+            elif not zap_matched_cyberherd:
+                difference = round(TRIGGER_AMOUNT_SATS - app_state.balance)
                 if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
@@ -782,6 +775,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                     await send_messages_to_clients(message)
         else:
             logger.info("Feeder override is ON or payment amount is non-positive. Skipping.")
+
     except Exception as e:
         logger.error(f"Error processing payment data: {e}")
         raise
@@ -869,7 +863,9 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             if targets:
                 await update_cyberherd_targets(targets)
 
-        background_tasks.add_task(notify_new_members, new_members, None, current_herd_size)
+        # Replace background_tasks.add_task with asyncio.create_task for notify_new_members
+        asyncio.create_task(notify_new_members(new_members, None, current_herd_size))
+
         return {"status": "success", "new_members_added": len(new_members)}
     except HTTPException as e:
         raise e
@@ -966,9 +962,7 @@ async def delete_cyber_herd(lud16: str):
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
     async with app_state.lock:
-        if app_state.trigger_amount is None:
-            raise HTTPException(status_code=500, detail="Trigger amount is not set.")
-        return {"trigger_amount": app_state.trigger_amount}
+        return {"trigger_amount": TRIGGER_AMOUNT_SATS}
 
 @app.get("/convert/{amount}")
 async def convert(amount: float):
@@ -1054,3 +1048,4 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal Server Error"}
     )
+
