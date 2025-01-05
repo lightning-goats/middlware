@@ -49,6 +49,8 @@ PREDEFINED_WALLET_PERCENT_RESET = 100
 PREDEFINED_WALLET_PERCENT_DEFAULT = 90
 TRIGGER_AMOUNT_SATS = 1000
 
+notification_semaphore = asyncio.Semaphore(5) #limit concurrant notifications
+
 # Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -280,9 +282,6 @@ async def startup():
     global http_client
     http_client = httpx.AsyncClient(http2=True)
 
-    # Initialize application state
-    await app_state.initialize_trigger_amount()
-
     # Start WebSocket manager
     websocket_task = asyncio.create_task(websocket_manager.connect())
     connected = await websocket_manager.wait_for_connection(timeout=30)
@@ -490,47 +489,52 @@ async def update_cyberherd_targets(targets):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 async def notify_new_members(new_members, difference, current_herd_size):
-    for item_dict in new_members:
-        try:
-            # Calculate spots remaining dynamically
-            spots_remaining = MAX_HERD_SIZE - current_herd_size
-
-            # Generate a message using `messaging.make_messages`
-            message_content, raw_command_output = await messaging.make_messages(
-                config['NOS_SEC'],
-                0,  # Amount placeholder
-                difference,
-                "cyber_herd",
-                item_dict,
-                spots_remaining
-            )
-            await send_messages_to_clients(message_content)
-
-            # Parse raw_command_output for the note_id
+    async with notification_semaphore:
+        for item_dict in new_members:
             try:
-                command_output_json = json.loads(raw_command_output)
-                note_id = command_output_json.get("id")
-            except json.JSONDecodeError:
-                logger.error(f"Invalid JSON from messaging.make_messages: {raw_command_output}")
-                continue
+                # Log the start of the notification process
+                logger.info(f"Notifying member with pubkey: {item_dict['pubkey']}")
 
-            # Update the database with the note_id if available
-            if note_id:
-                update_query = """
-                UPDATE cyber_herd
-                SET notified = :notified
-                WHERE pubkey = :pubkey
-                """
-                await database.execute(
-                    update_query,
-                    values={"notified": note_id, "pubkey": item_dict['pubkey']}
+                # Calculate spots remaining dynamically
+                spots_remaining = MAX_HERD_SIZE - current_herd_size
+
+                # Generate a message using `messaging.make_messages`
+                message_content, raw_command_output = await messaging.make_messages(
+                    config['NOS_SEC'],
+                    0,  # Amount placeholder
+                    difference,
+                    "cyber_herd",
+                    item_dict,
+                    spots_remaining
                 )
-                logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
-            else:
-                logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
+                await send_messages_to_clients(message_content)
 
-        except Exception as e:
-            logger.exception(f"Error while notifying and updating for pubkey: {item_dict.get('pubkey', 'unknown')}")
+                # Parse `raw_command_output` for the note_id
+                try:
+                    command_output_json = json.loads(raw_command_output)
+                    note_id = command_output_json.get("id")
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON from messaging.make_messages: {raw_command_output}")
+                    continue
+
+                # Update the database with the note_id if available
+                if note_id:
+                    update_query = """
+                    UPDATE cyber_herd
+                    SET notified = :notified
+                    WHERE pubkey = :pubkey
+                    """
+                    await database.execute(
+                        update_query,
+                        values={"notified": note_id, "pubkey": item_dict['pubkey']}
+                    )
+                    logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
+                else:
+                    logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
+
+            except Exception as e:
+                logger.exception(f"Error while notifying and updating for pubkey: {item_dict.get('pubkey', 'unknown')}")
+
 
 @http_retry
 async def get_balance(force_refresh=False):
@@ -669,7 +673,6 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
 
-        wallet_fiat_rate = payment.get('extra', {}).get('wallet_fiat_rate')
         wallet_balance = payment_data.get('wallet_balance')
 
         async with app_state.lock:
@@ -827,8 +830,8 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
-        targets_to_create = []
         new_members = []
+        difference = round(TRIGGER_AMOUNT_SATS - app_state.balance)
 
         for item in data:
             item_dict = item.dict()
@@ -843,12 +846,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                 item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
                 new_members.append(item_dict)
 
-                if item_dict['lud16']:
-                    targets_to_create.append({
-                        'wallet': item_dict['lud16'],
-                        'alias': item_dict['pubkey'],
-                    })
-
                 current_herd_size += 1
 
         if new_members:
@@ -858,17 +855,13 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             """
             await database.execute_many(insert_query, new_members)
 
-        if targets_to_create:
-            targets = await create_cyberherd_targets(targets_to_create, [])
-            if targets:
-                await update_cyberherd_targets(targets)
-
-        # Replace background_tasks.add_task with asyncio.create_task for notify_new_members
-        asyncio.create_task(notify_new_members(new_members, None, current_herd_size))
+        # Replace `background_tasks.add_task` with explicit logging for better debugging
+        task = asyncio.create_task(notify_new_members(new_members, difference, current_herd_size))
+        task.add_done_callback(
+            lambda t: logger.error(f"notify_new_members encountered an error: {t.exception()}") if t.exception() else None
+        )
 
         return {"status": "success", "new_members_added": len(new_members)}
-    except HTTPException as e:
-        raise e
     except Exception as e:
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
