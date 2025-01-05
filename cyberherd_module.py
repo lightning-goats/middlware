@@ -4,6 +4,8 @@ import logging
 import re
 from typing import Optional, Dict, Any
 import httpx
+import subprocess
+
 from subprocess import TimeoutExpired, CompletedProcess
 
 # Logging Configuration
@@ -201,3 +203,47 @@ async def generate_nprofile(pubkey: str) -> Optional[str]:
         except Exception as e:
             logger.error(f"Unexpected error generating nprofile: {e}")
         return None
+
+async def check_cyberherd_tag(event_id: str, relay_url: str = "ws://127.0.0.1:3002/nostrrelay/666") -> bool:
+    """
+    Check if the event identified by `event_id` has a 'CyberHerd' tag using the nak command.
+
+    Args:
+        event_id (str): The ID of the event to check.
+        relay_url (str): The relay WebSocket URL. Defaults to localhost.
+
+    Returns:
+        bool: True if the event has a 'CyberHerd' tag, False otherwise.
+    """
+    nak_command = ["nak", "req", "-i", event_id, relay_url]
+    try:
+        # Run the nak command
+        result = subprocess.run(nak_command, capture_output=True, text=True, check=True)
+        
+        # Parse the JSON output
+        event_data = json.loads(result.stdout)
+
+        # Log the full output for debugging purposes
+        logger.debug(f"nak command output: {event_data}")
+
+        # Ensure the `tags` field exists and is a list of lists
+        tags = event_data.get("tags", [])
+        if isinstance(tags, list) and all(isinstance(tag, list) and len(tag) >= 2 for tag in tags):
+            # Check if any tag has "t" as the first element and "CyberHerd" (case insensitive) as the second
+            for tag in tags:
+                if tag[0] == "t" and tag[1].lower() == "cyberherd":
+                    logger.info(f"'CyberHerd' tag found for event_id: {event_id}")
+                    return True
+
+        # Log unexpected format or absence of the tag
+        logger.info(f"No 'CyberHerd' tag found for event_id: {event_id}")
+        return False
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running nak command: {e.stderr}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON output from nak command: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error while checking CyberHerd tag: {e}")
+
+    return False
