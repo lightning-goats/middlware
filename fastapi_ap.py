@@ -718,10 +718,8 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                 nprofile = await generate_nprofile(pubkey)
                                 if not nprofile:
                                     logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
-                                else:
-                                    logger.info(f"Generated nprofile: {nprofile}")
 
-                                    # Create CyberHerdData instance
+                                    # Create CyberHerdData instance TODO:  send payment_amount and use in messaging.
                                     new_member_data = CyberHerdData(
                                         display_name=display_name,
                                         event_id=event_id,  # Set to the zapped note ID
@@ -734,13 +732,8 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                         payouts=0.0
                                     )
 
-                                    # Call update_cyber_herd with the new member
+                                    # Add new cyberherd member
                                     result = await update_cyber_herd([new_member_data], background_tasks)
-
-                                    if result.get("status") == "success":
-                                        logger.info(f"Added new member to CyberHerd: {pubkey}")
-                                    else:
-                                        logger.warning(f"Failed to add new member to CyberHerd: {pubkey}")
                         else:
                             logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
                     else:
@@ -822,32 +815,50 @@ async def create_invoice_route(
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData], background_tasks: BackgroundTasks):
     try:
+        # Get the current herd size
         query = "SELECT COUNT(*) as count FROM cyber_herd"
         result = await database.fetch_one(query)
         current_herd_size = result['count']
 
+        # Check if the herd is already at or above max size
         if current_herd_size >= MAX_HERD_SIZE:
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
+        # Prepare lists for new members and new targets
         new_members = []
+        targets_to_create = []
+
+        # Calculate the difference for 'notify_new_members'
         difference = round(TRIGGER_AMOUNT_SATS - app_state.balance)
 
+        # Iterate over each incoming item
         for item in data:
             item_dict = item.dict()
             pubkey = item_dict['pubkey']
 
-            # Check if the record already exists
+            # Check if this pubkey is already in the database
             check_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE pubkey = :pubkey"
             result = await database.fetch_one(check_query, values={"pubkey": pubkey})
 
+            # If not in DB and we haven't hit MAX_HERD_SIZE, add to the new_members list
             if result['count'] == 0 and current_herd_size < MAX_HERD_SIZE:
                 item_dict['notified'] = None
+                # Convert list of kinds to a comma-separated string
                 item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
                 new_members.append(item_dict)
 
+                # If there is an lud16, prepare a target entry
+                if item_dict['lud16']:
+                    targets_to_create.append({
+                        'wallet': item_dict['lud16'],
+                        'alias': item_dict['pubkey'],
+                    })
+
+                # Increase herd count
                 current_herd_size += 1
 
+        # If we have new members, insert them into the DB
         if new_members:
             insert_query = """
             INSERT INTO cyber_herd (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
@@ -855,14 +866,26 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             """
             await database.execute_many(insert_query, new_members)
 
-        # Replace `background_tasks.add_task` with explicit logging for better debugging
+        # If we have new targets to create, do so and then update them
+        if targets_to_create:
+            # create_cyberherd_targets returns the newly created targets or None
+            targets = await create_cyberherd_targets(targets_to_create, [])
+            if targets:
+                await update_cyberherd_targets(targets)
+
+        # Launch the notification task explicitly (rather than using BackgroundTasks)
         task = asyncio.create_task(notify_new_members(new_members, difference, current_herd_size))
         task.add_done_callback(
-            lambda t: logger.error(f"notify_new_members encountered an error: {t.exception()}") if t.exception() else None
+            lambda t: logger.error(f"notify_new_members encountered an error: {t.exception()}") 
+            if t.exception() else None
         )
 
         return {"status": "success", "new_members_added": len(new_members)}
+    except HTTPException as e:
+        # Pass through HTTPExceptions without wrapping
+        raise e
     except Exception as e:
+        # Any other exception, log and raise 500
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
