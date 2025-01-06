@@ -101,7 +101,6 @@ async def make_messages(
         command = (
             f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
             f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
-            f'--tag t="CyberHerd" '
             f'-p {pub_key} '
             f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
         )
@@ -127,7 +126,6 @@ async def make_messages(
         command = None  # No command execution needed for interface info
 
     async def execute_command(command):
-        logger.info(f"Executing command: {command}")
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
