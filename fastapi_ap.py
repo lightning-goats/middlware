@@ -67,7 +67,7 @@ app = FastAPI()
 # Globals and State Management
 class AppState:
     def __init__(self):
-        self.balance = None
+        self.balance: int = 0
         self.lock = Lock()
 
 app_state = AppState()
@@ -287,6 +287,13 @@ async def startup():
     connected = await websocket_manager.wait_for_connection(timeout=30)
     if not connected:
         logger.warning("Initial WebSocket connection attempt timed out")
+
+    try:
+            response = await get_balance_route(force_refresh=True)
+            app_state.balance = response.get("balance", 0)
+    except Exception as e:
+            logger.error(f"Failed to retrieve balance in startup_event: {e}. Defaulting to 0.")
+            app_state.balance = 0
 
     # Connect to database and create tables (no 'messages' table anymore)
     await database.connect()
@@ -539,13 +546,10 @@ async def notify_new_members(new_members, difference, current_herd_size):
 @http_retry
 async def get_balance(force_refresh=False):
     try:
-        async with app_state.lock:
-            if app_state.balance is not None and not force_refresh:
-                return app_state.balance
-
         response = await http_client.get(f'{LNBITS_URL}/api/v1/wallet', headers={'X-Api-Key': config['HERD_KEY']})
         response.raise_for_status()
         balance = response.json()['balance']
+        
         async with app_state.lock:
             app_state.balance = balance
         return balance
@@ -719,7 +723,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                 if not nprofile:
                                     logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
 
-                                    # Create CyberHerdData instance TODO:  send payment_amount and use in messaging.
+                                    # Create CyberHerdData instance
                                     new_member_data = CyberHerdData(
                                         display_name=display_name,
                                         event_id=event_id,  # Set to the zapped note ID
@@ -729,7 +733,8 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                         nprofile=nprofile,
                                         lud16=lud16,
                                         notified=None,
-                                        payouts=0.0
+                                        payouts=0.0,
+                                        amount=payment_amount
                                     )
 
                                     # Add new cyberherd member
