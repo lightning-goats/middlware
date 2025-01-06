@@ -232,7 +232,6 @@ async def check_cyberherd_tag(event_id: str, relay_url: str = "ws://127.0.0.1:30
             # Check if any tag has "t" as the first element and "CyberHerd" (case insensitive) as the second
             for tag in tags:
                 if tag[0] == "t" and tag[1].lower() == "cyberherd":
-                    logger.info(f"'CyberHerd' tag found for event_id: {event_id}")
                     return True
 
         # Log unexpected format or absence of the tag
