@@ -91,6 +91,7 @@ class CyberHerdData(BaseModel):
     lud16: str
     notified: Optional[str] = None
     payouts: float = 0.0
+    amount: Optional[int] = 0
 
     class Config:
         extra = 'ignore'
@@ -551,7 +552,7 @@ async def get_balance(force_refresh=False):
         balance = response.json()['balance']
         
         async with app_state.lock:
-            app_state.balance = balance
+            app_state.balance = math.floor(balance / 1000)
         return balance
             
     except httpx.HTTPError as e:
@@ -678,9 +679,10 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
         payment_amount = payment.get('amount', 0)
 
         wallet_balance = payment_data.get('wallet_balance')
-
+        logger.info(f"wallet_balance from LNbits event: {wallet_balance}")
+        
         async with app_state.lock:
-            app_state.balance = wallet_balance
+            app_state.balance = math.floor(wallet_balance)
 
         # Check for Nostr data and handle CyberHerd addition
         nostr_data_raw = payment.get('extra', {}).get('nostr')
@@ -722,6 +724,8 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                 nprofile = await generate_nprofile(pubkey)
                                 if not nprofile:
                                     logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
+                                else:
+                                    logger.info(f"generated nprofile: {nprofile} for {pubkey}")
 
                                     # Create CyberHerdData instance
                                     new_member_data = CyberHerdData(
@@ -738,6 +742,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                     )
 
                                     # Add new cyberherd member
+                                    logger.info(f"Calling update_cyber_herd() with {new_member_data}")
                                     result = await update_cyber_herd([new_member_data], background_tasks)
                         else:
                             logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
@@ -765,7 +770,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 
             # Execute "sats_received" logic for non-zaps or zaps without CyberHerd match
             elif not zap_matched_cyberherd:
-                difference = round(TRIGGER_AMOUNT_SATS - app_state.balance)
+                difference = TRIGGER_AMOUNT_SATS - app_state.balance
                 if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
@@ -783,12 +788,10 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 
 @http_retry
 async def send_payment(balance: int):
-    balance = balance * 1000
-    withdraw = int(balance / 1000)
     memo = 'Reset Herd Wallet'
     
     try:
-        payment_request = await create_invoice(withdraw, memo)
+        payment_request = await create_invoice(balance, memo)
         payment_status = await pay_invoice(payment_request)
         return {"success": True, "data": payment_status}
     except HTTPException as e:
@@ -834,9 +837,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
         new_members = []
         targets_to_create = []
 
-        # Calculate the difference for 'notify_new_members'
-        difference = round(TRIGGER_AMOUNT_SATS - app_state.balance)
-
         # Iterate over each incoming item
         for item in data:
             item_dict = item.dict()
@@ -864,7 +864,7 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                 current_herd_size += 1
 
         # If we have new members, insert them into the DB
-        if new_members:
+        if new_members:  
             insert_query = """
             INSERT INTO cyber_herd (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
             VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts)
@@ -878,7 +878,9 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             if targets:
                 await update_cyberherd_targets(targets)
 
-        # Launch the notification task explicitly (rather than using BackgroundTasks)
+        # Calculate the difference for 'notify_new_members'
+        difference = TRIGGER_AMOUNT_SATS - app_state.balance
+        
         task = asyncio.create_task(notify_new_members(new_members, difference, current_herd_size))
         task.add_done_callback(
             lambda t: logger.error(f"notify_new_members encountered an error: {t.exception()}") 
