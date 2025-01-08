@@ -308,7 +308,8 @@ async def startup():
             nprofile TEXT,
             lud16 TEXT,
             notified TEXT,
-            payouts REAL
+            payouts REAL,
+            amount INTEGER
         )
     ''')
     await database.execute('''
@@ -694,6 +695,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                 pubkey = nostr_data.get('pubkey')
                 note = nostr_data.get('id')  # Set 'note' to the zap event's ID
                 kinds = [9734]  # Example: Assigning kind 9734 for now
+                amount = payment_amount / 1000
 
                 # Extract the 'e' tag (zapped note ID)
                 event_id = next((tag[1] for tag in nostr_data.get('tags', []) if tag[0] == 'e'), None)
@@ -738,7 +740,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                         lud16=lud16,
                                         notified=None,
                                         payouts=0.0,
-                                        amount=payment_amount
+                                        amount=amount
                                     )
 
                                     # Add new cyberherd member
@@ -866,8 +868,10 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
         # If we have new members, insert them into the DB
         if new_members:  
             insert_query = """
-            INSERT INTO cyber_herd (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts)
-            VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts)
+            INSERT INTO cyber_herd 
+              (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts, amount)
+            VALUES 
+              (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts, :amount)
             """
             await database.execute_many(insert_query, new_members)
 
@@ -881,13 +885,9 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
         # Calculate the difference for 'notify_new_members'
         difference = TRIGGER_AMOUNT_SATS - app_state.balance
         
-        task = asyncio.create_task(notify_new_members(new_members, difference, current_herd_size))
-        task.add_done_callback(
-            lambda t: logger.error(f"notify_new_members encountered an error: {t.exception()}") 
-            if t.exception() else None
-        )
-
+        background_tasks.add_task(notify_new_members, new_members, difference, current_herd_size)
         return {"status": "success", "new_members_added": len(new_members)}
+
     except HTTPException as e:
         # Pass through HTTPExceptions without wrapping
         raise e
