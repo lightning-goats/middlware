@@ -853,12 +853,10 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                 current_herd_size += 1
 
             elif result['count'] > 0:
-                # Update logic for existing members
                 new_amount = item_dict.get('amount', 0)
-                kinds_int = list(map(int, item.kinds))  # Ensure kinds are integers
+                kinds_int = list(map(int, item.kinds))
 
                 if any(kind in [6, 7, 9734] for kind in kinds_int):
-                    # Calculate new payout increment based on kind
                     if 9734 in kinds_int:
                         payout_increment = calculate_payout(new_amount)
                     elif 7 in kinds_int:
@@ -866,7 +864,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                     elif 6 in kinds_int:
                         payout_increment = 0.1
 
-                    # Update kinds, payouts, and other details
                     fetch_info_query = "SELECT kinds, notified FROM cyber_herd WHERE pubkey = :pubkey"
                     row = await database.fetch_one(fetch_info_query, values={"pubkey": pubkey})
                     current_kinds_str = row["kinds"] if row and row["kinds"] else ""
@@ -877,13 +874,12 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                     updated_kinds = current_kinds.union(new_kinds_str)
                     updated_kinds_str = ','.join(sorted(updated_kinds))
 
-                    # Notify if needed
                     if notified_status is None and updated_kinds_str != current_kinds_str:
                         spots_remaining = MAX_HERD_SIZE - current_herd_size
                         clamped_difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
                         message_content, raw_command_output = await messaging.make_messages(
                             config['NOS_SEC'],
-                            0,  # Amount placeholder
+                            0,
                             clamped_difference,
                             "cyber_herd",
                             item_dict,
@@ -892,7 +888,6 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                         await send_messages_to_clients(message_content)
                         await update_notified_field(pubkey, raw_command_output)
 
-                    # Update database
                     update_query = """
                         UPDATE cyber_herd
                         SET amount = amount + :new_amount,
@@ -917,19 +912,30 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                         "pubkey": pubkey
                     })
 
-        # Handle new wallet targets
-        if new_members or targets_to_create:
-            initial_targets = await fetch_cyberherd_targets()
-            targets = await create_cyberherd_targets(
-                new_targets_data=targets_to_create,
-                initial_targets=initial_targets
-            )
-            if targets:
-                await update_cyberherd_targets(targets)
+        # Always recalculate and update LNbits targets using the current database state
+        initial_targets = await fetch_cyberherd_targets()
+        current_members = await database.fetch_all(
+            "SELECT lud16, pubkey, payouts FROM cyber_herd WHERE lud16 IS NOT NULL"
+        )
+        all_targets = [
+            {
+                'wallet': member['lud16'],
+                'alias': member['pubkey'],
+                'payouts': member['payouts']
+            }
+            for member in current_members
+        ]
+
+        targets = await create_cyberherd_targets(new_targets_data=all_targets, initial_targets=initial_targets)
+        if targets:
+            await update_cyberherd_targets(targets)
 
         if should_get_balance:
             response = await get_balance_route(force_refresh=True)
-            app_state.balance = int(response.get("balance", 0) / 1000)
+            # Note: get_balance_route returns a dictionary with 'balance' key.
+            # Adjusting balance calculation accordingly:
+            balance_value = response.get("balance", 0)
+            app_state.balance = int(balance_value / 1000)
 
         difference_raw = TRIGGER_AMOUNT_SATS - app_state.balance
         difference = max(0, difference_raw)
@@ -1118,4 +1124,3 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal Server Error"}
     )
-
