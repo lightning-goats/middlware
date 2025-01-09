@@ -408,6 +408,17 @@ async def periodic_informational_messages():
             message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
             await send_messages_to_clients(message)
 
+def calculate_payout(amount: float) -> float:
+    """
+    Calculate payout increment based on the given amount in sats.
+    Amounts under 100 sats count as 0.1, and each additional 100 sats adds another 0.1,
+    capping at 1.0 for 1000 sats or more.
+    """
+    # Round up to the nearest hundred sats, capped at 1000 sats (i.e., 10 units)
+    units = (amount + 99) // 100  # ceiling division for multiples of 100
+    units = min(units, 10)  # cap at 10 units (for 1000 sats or more)
+    return units * 0.1
+
 @http_retry
 async def fetch_cyberherd_targets():
     url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
@@ -420,13 +431,12 @@ async def fetch_cyberherd_targets():
     return response.json()
 
 @http_retry
-async def create_cyberherd_targets(new_targets_data, initial_targets, predefined_percent=PREDEFINED_WALLET_PERCENT_DEFAULT):
+async def create_cyberherd_targets(new_targets_data, initial_targets):
     try:
-        fetched_wallets = {item['wallet']: item for item in initial_targets}
         predefined_wallet = {
             'wallet': PREDEFINED_WALLET_ADDRESS,
             'alias': PREDEFINED_WALLET_ALIAS,
-            'percent': predefined_percent
+            'percent': 90  # At least 90%, recalculated below
         }
         combined_wallets = []
 
@@ -434,42 +444,32 @@ async def create_cyberherd_targets(new_targets_data, initial_targets, predefined
             wallet = item['wallet']
             name = item.get('alias', 'Unknown')
             payouts = item.get('payouts', 1.0)
-            if wallet not in fetched_wallets and wallet != predefined_wallet['wallet']:
+            if wallet != predefined_wallet['wallet']:
                 combined_wallets.append({'wallet': wallet, 'alias': name, 'payouts': payouts})
 
-        for wallet, details in fetched_wallets.items():
-            if wallet != predefined_wallet['wallet']:
-                payouts = details.get('payouts', 1.0)
-                combined_wallets.append({'wallet': wallet, 'alias': details.get('alias', 'Unknown'), 'payouts': payouts})
+        # Calculate total payouts for non-predefined wallets
+        total_payouts = sum(wallet['payouts'] for wallet in combined_wallets)
+        if total_payouts == 0:
+            total_payouts = 1  # Avoid division by zero
 
-        total_percent_allocation = predefined_wallet['percent']
-        targets_list = [predefined_wallet]
+        # Cap total non-predefined allocation at 10%
+        total_allocation = 10
+        targets_list = []
 
-        if combined_wallets:
-            total_payouts = sum(wallet['payouts'] for wallet in combined_wallets)
-            if total_payouts == 0:
-                total_payouts = 1
+        for wallet in combined_wallets:
+            base_percent = max(1, round(total_allocation * (wallet['payouts'] / total_payouts)))
+            wallet['percent'] = base_percent
+            targets_list.append(wallet)
 
-            remaining_allocation = 100 - total_percent_allocation
-            for wallet in combined_wallets:
-                base_percent = remaining_allocation * (wallet['payouts'] / total_payouts)
-                wallet['percent'] = max(1, round(base_percent))
+        # Ensure the total allocation for non-predefined wallets doesn't exceed 10%
+        allocated_percent = sum(wallet['percent'] for wallet in targets_list)
+        if allocated_percent > total_allocation:
+            excess = allocated_percent - total_allocation
+            targets_list[-1]['percent'] -= excess
 
-            total_percent_allocation += sum(wallet['percent'] for wallet in combined_wallets)
-
-            if total_percent_allocation > 100:
-                excess_allocation = total_percent_allocation - 100
-                combined_wallets[-1]['percent'] -= excess_allocation
-            elif total_percent_allocation < 100:
-                remaining_allocation = 100 - total_percent_allocation
-                combined_wallets[-1]['percent'] += remaining_allocation
-
-            for wallet in combined_wallets:
-                targets_list.append({
-                    'wallet': wallet['wallet'],
-                    'alias': wallet['alias'],
-                    'percent': wallet['percent']
-                })
+        # Remaining allocation goes to the predefined wallet
+        predefined_wallet['percent'] = 100 - sum(wallet['percent'] for wallet in targets_list)
+        targets_list.insert(0, predefined_wallet)
 
         targets = {"targets": targets_list}
         return targets
@@ -501,13 +501,10 @@ async def notify_new_members(new_members, difference, current_herd_size):
     async with notification_semaphore:
         for item_dict in new_members:
             try:
-                # Log the start of the notification process
                 logger.info(f"Notifying member with pubkey: {item_dict['pubkey']}")
 
-                # Calculate spots remaining dynamically
                 spots_remaining = MAX_HERD_SIZE - current_herd_size
 
-                # Generate a message using `messaging.make_messages`
                 message_content, raw_command_output = await messaging.make_messages(
                     config['NOS_SEC'],
                     0,  # Amount placeholder
@@ -518,31 +515,30 @@ async def notify_new_members(new_members, difference, current_herd_size):
                 )
                 await send_messages_to_clients(message_content)
 
-                # Parse `raw_command_output` for the note_id
-                try:
-                    command_output_json = json.loads(raw_command_output)
-                    note_id = command_output_json.get("id")
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON from messaging.make_messages: {raw_command_output}")
-                    continue
-
-                # Update the database with the note_id if available
-                if note_id:
-                    update_query = """
-                    UPDATE cyber_herd
-                    SET notified = :notified
-                    WHERE pubkey = :pubkey
-                    """
-                    await database.execute(
-                        update_query,
-                        values={"notified": note_id, "pubkey": item_dict['pubkey']}
-                    )
-                    logger.info(f"Database updated for pubkey: {item_dict['pubkey']}")
-                else:
-                    logger.error(f"No note_id found in command output for pubkey: {item_dict['pubkey']}")
+                # Use the new helper function to update the 'notified' field
+                await update_notified_field(item_dict['pubkey'], raw_command_output)
 
             except Exception as e:
                 logger.exception(f"Error while notifying and updating for pubkey: {item_dict.get('pubkey', 'unknown')}")
+
+async def update_notified_field(pubkey: str, raw_command_output: str):
+    """
+    Update the 'notified' field in the cyber_herd table for a given pubkey using
+    information extracted from raw_command_output.
+    """
+    update_notified_query = """
+        UPDATE cyber_herd 
+        SET notified = :notified_value 
+        WHERE pubkey = :pubkey
+    """
+    notified_value = "notified"  # Default marker
+    try:
+        command_output_json = json.loads(raw_command_output)
+        # Use the 'id' from the command output if available
+        notified_value = command_output_json.get("id", "notified")
+    except Exception:
+        pass
+    await database.execute(update_notified_query, values={"notified_value": notified_value, "pubkey": pubkey})
 
 
 @http_retry
@@ -687,14 +683,13 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 
         # Check for Nostr data and handle CyberHerd addition
         nostr_data_raw = payment.get('extra', {}).get('nostr')
-        zap_matched_cyberherd = False  # Track if zap matches CyberHerd tag
 
         if nostr_data_raw and payment_amount >= 21000:
             try:
                 nostr_data = json.loads(nostr_data_raw)
                 pubkey = nostr_data.get('pubkey')
                 note = nostr_data.get('id')  # Set 'note' to the zap event's ID
-                kinds = [9734]  # Example: Assigning kind 9734 for now
+                kinds = [9734]
                 amount = payment_amount / 1000
 
                 # Extract the 'e' tag (zapped note ID)
@@ -703,7 +698,6 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                 if pubkey and event_id:
                     # Check for CyberHerd tag using the module function
                     if await check_cyberherd_tag(event_id):
-                        zap_matched_cyberherd = True
                         # Fetch metadata for the pubkey
                         metadata_fetcher = MetadataFetcher()
                         metadata = await metadata_fetcher.lookup_metadata(pubkey)
@@ -771,7 +765,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                         await send_messages_to_clients(message)
 
             # Execute "sats_received" logic for non-zaps or zaps without CyberHerd match
-            elif not zap_matched_cyberherd:
+            else:
                 difference = TRIGGER_AMOUNT_SATS - app_state.balance
                 if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
@@ -825,74 +819,127 @@ async def create_invoice_route(
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData], background_tasks: BackgroundTasks):
     try:
-        # Get the current herd size
+        should_get_balance = any(9734 not in item.kinds for item in data)
+
         query = "SELECT COUNT(*) as count FROM cyber_herd"
         result = await database.fetch_one(query)
         current_herd_size = result['count']
 
-        # Check if the herd is already at or above max size
         if current_herd_size >= MAX_HERD_SIZE:
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
-        # Prepare lists for new members and new targets
         new_members = []
         targets_to_create = []
 
-        # Iterate over each incoming item
         for item in data:
             item_dict = item.dict()
             pubkey = item_dict['pubkey']
 
-            # Check if this pubkey is already in the database
             check_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE pubkey = :pubkey"
             result = await database.fetch_one(check_query, values={"pubkey": pubkey})
 
-            # If not in DB and we haven't hit MAX_HERD_SIZE, add to the new_members list
             if result['count'] == 0 and current_herd_size < MAX_HERD_SIZE:
                 item_dict['notified'] = None
-                # Convert list of kinds to a comma-separated string
                 item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
                 new_members.append(item_dict)
 
-                # If there is an lud16, prepare a target entry
                 if item_dict['lud16']:
                     targets_to_create.append({
                         'wallet': item_dict['lud16'],
                         'alias': item_dict['pubkey'],
                     })
 
-                # Increase herd count
                 current_herd_size += 1
 
-        # If we have new members, insert them into the DB
-        if new_members:  
-            insert_query = """
-            INSERT INTO cyber_herd 
-              (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts, amount)
-            VALUES 
-              (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts, :amount)
-            """
-            await database.execute_many(insert_query, new_members)
+            elif result['count'] > 0:
+                # Update logic for existing members
+                new_amount = item_dict.get('amount', 0)
+                kinds_int = list(map(int, item.kinds))  # Ensure kinds are integers
 
-        # If we have new targets to create, do so and then update them
-        if targets_to_create:
-            # create_cyberherd_targets returns the newly created targets or None
-            targets = await create_cyberherd_targets(targets_to_create, [])
+                if any(kind in [6, 7, 9734] for kind in kinds_int):
+                    # Calculate new payout increment based on kind
+                    if 9734 in kinds_int:
+                        payout_increment = calculate_payout(new_amount)
+                    elif 7 in kinds_int:
+                        payout_increment = 0.05
+                    elif 6 in kinds_int:
+                        payout_increment = 0.1
+
+                    # Update kinds, payouts, and other details
+                    fetch_info_query = "SELECT kinds, notified FROM cyber_herd WHERE pubkey = :pubkey"
+                    row = await database.fetch_one(fetch_info_query, values={"pubkey": pubkey})
+                    current_kinds_str = row["kinds"] if row and row["kinds"] else ""
+                    notified_status = row["notified"] if row else None
+                    current_kinds = set(current_kinds_str.split(',')) if current_kinds_str else set()
+
+                    new_kinds_str = set(map(str, kinds_int))
+                    updated_kinds = current_kinds.union(new_kinds_str)
+                    updated_kinds_str = ','.join(sorted(updated_kinds))
+
+                    # Notify if needed
+                    if notified_status is None and updated_kinds_str != current_kinds_str:
+                        spots_remaining = MAX_HERD_SIZE - current_herd_size
+                        clamped_difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
+                        message_content, raw_command_output = await messaging.make_messages(
+                            config['NOS_SEC'],
+                            0,  # Amount placeholder
+                            clamped_difference,
+                            "cyber_herd",
+                            item_dict,
+                            spots_remaining
+                        )
+                        await send_messages_to_clients(message_content)
+                        await update_notified_field(pubkey, raw_command_output)
+
+                    # Update database
+                    update_query = """
+                        UPDATE cyber_herd
+                        SET amount = amount + :new_amount,
+                            payouts = payouts + :payout_increment,
+                            kinds = :updated_kinds,
+                            event_id = :event_id,
+                            note = :note,
+                            display_name = :display_name,
+                            nprofile = :nprofile,
+                            lud16 = :lud16
+                        WHERE pubkey = :pubkey
+                    """
+                    await database.execute(update_query, values={
+                        "new_amount": new_amount,
+                        "payout_increment": payout_increment,
+                        "updated_kinds": updated_kinds_str,
+                        "event_id": item_dict.get("event_id"),
+                        "note": item_dict.get("note"),
+                        "display_name": item_dict.get("display_name"),
+                        "nprofile": item_dict.get("nprofile"),
+                        "lud16": item_dict.get("lud16"),
+                        "pubkey": pubkey
+                    })
+
+        # Handle new wallet targets
+        if new_members or targets_to_create:
+            initial_targets = await fetch_cyberherd_targets()
+            targets = await create_cyberherd_targets(
+                new_targets_data=targets_to_create,
+                initial_targets=initial_targets
+            )
             if targets:
                 await update_cyberherd_targets(targets)
 
-        # Calculate the difference for 'notify_new_members'
-        difference = TRIGGER_AMOUNT_SATS - app_state.balance
-        
+        if should_get_balance:
+            response = await get_balance_route(force_refresh=True)
+            app_state.balance = int(response.get("balance", 0) / 1000)
+
+        difference_raw = TRIGGER_AMOUNT_SATS - app_state.balance
+        difference = max(0, difference_raw)
+
         background_tasks.add_task(notify_new_members, new_members, difference, current_herd_size)
         return {"status": "success", "new_members_added": len(new_members)}
 
     except HTTPException as e:
-        # Pass through HTTPExceptions without wrapping
         raise e
     except Exception as e:
-        # Any other exception, log and raise 500
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
