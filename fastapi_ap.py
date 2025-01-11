@@ -1,4 +1,4 @@
-from math import ceil
+from math import floor
 from typing import List, Optional, Dict, Set
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request, BackgroundTasks
@@ -39,7 +39,7 @@ from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check
 
 
 # Configuration and Constants
-MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
+MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 5))
 PRICE = float(os.getenv('PRICE', 1.00))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
@@ -47,7 +47,7 @@ HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036a
 PREDEFINED_WALLET_ADDRESS = 'bolverker@strike.me'
 PREDEFINED_WALLET_ALIAS = 'Bolverker'
 PREDEFINED_WALLET_PERCENT_RESET = 100
-PREDEFINED_WALLET_PERCENT_DEFAULT = 80
+PREDEFINED_WALLET_PERCENT_DEFAULT = 90
 TRIGGER_AMOUNT_SATS = 1000
 
 notification_semaphore = asyncio.Semaphore(6) #limit concurrent notifications
@@ -431,9 +431,12 @@ async def fetch_cyberherd_targets():
     response.raise_for_status()
     return response.json()
 
+from math import floor
+
 @http_retry
 async def create_cyberherd_targets(new_targets_data, initial_targets):
     try:
+        # Initialize predefined wallet with default percentage
         predefined_wallet = {
             'wallet': PREDEFINED_WALLET_ADDRESS,
             'alias': PREDEFINED_WALLET_ALIAS,
@@ -449,43 +452,65 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
             if wallet != predefined_wallet['wallet']:
                 combined_wallets.append({'wallet': wallet, 'alias': name, 'payouts': payouts})
 
-        total_payouts = sum(wallet['payouts'] for wallet in combined_wallets)
-        if total_payouts == 0:
-            total_payouts = 1  # Avoid division by zero
+        total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
 
-        # Dynamically calculate total_allocation as sum(payouts)*10%
+        # Calculate fixed total allocation for non-predefined wallets
         max_allocation = 100 - PREDEFINED_WALLET_PERCENT_DEFAULT
-        scaling_factor = total_payouts
-        total_allocation = max_allocation * scaling_factor
+        total_allocation = max_allocation
 
-        targets_list = []
+        # Dynamically cap the number of wallets to ensure each can get at least 2% (because split payments fails below that)
+        min_percent_per_wallet = 1
+        max_wallets_allowed = floor(max_allocation / min_percent_per_wallet)
+        if len(combined_wallets) > max_wallets_allowed:
+            combined_wallets = sorted(combined_wallets, key=lambda x: x['payouts'], reverse=True)[:max_wallets_allowed]
+            total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
 
-        # Allocate percentages using ceiling to ensure whole percents
+        # Assign baseline minimum (2%) to each non-predefined wallet
         for wallet in combined_wallets:
-            allocation = total_allocation * (wallet['payouts'] / total_payouts)
-            base_percent = max(1, ceil(allocation))  # Always round up to whole percent
-            wallet['percent'] = base_percent
-            targets_list.append(wallet)
+            wallet['percent'] = min_percent_per_wallet
+        allocated = min_percent_per_wallet * len(combined_wallets)
+        remaining_allocation = total_allocation - allocated
 
-        # Adjust if allocated percent exceeds total_allocation
-        allocated_percent = sum(wallet['percent'] for wallet in targets_list)
-        if allocated_percent > total_allocation:
-            excess = allocated_percent - total_allocation
-            # Subtract excess from the last wallet, ensuring it stays at least 1%
-            targets_list[-1]['percent'] = max(1, targets_list[-1]['percent'] - excess)
+        # Distribute remaining allocation proportionally using floor
+        additional_allocations = []
+        for wallet in combined_wallets:
+            prop = wallet['payouts'] / total_payouts
+            # Calculate additional allocation based on proportion
+            additional = prop * remaining_allocation
+            additional_allocations.append((wallet, additional))
 
-        # Allocate remaining percent to predefined wallet
-        predefined_wallet['percent'] = 100 - sum(wallet['percent'] for wallet in targets_list)
+        # Assign whole percentages from additional allocation using floor
+        for wallet, additional in additional_allocations:
+            add_percent = floor(additional)
+            wallet['percent'] += add_percent
+
+        # Handle leftover percentages due to flooring
+        allocated_percent = sum(w['percent'] for w in combined_wallets)
+        leftover = total_allocation - allocated_percent
+
+        # Distribute leftover percentages one by one to wallets with highest fractional remainders
+        if leftover > 0:
+            remainders = []
+            for wallet, additional in additional_allocations:
+                fractional_part = additional - floor(additional)
+                remainders.append((fractional_part, wallet))
+            remainders.sort(reverse=True, key=lambda x: x[0])
+            for i in range(int(leftover)):
+                # Increase percent for wallets with highest remainders without using ceil
+                remainders[i][1]['percent'] += 1
+
+        targets_list = combined_wallets
+
+        # Allocate remaining percent to predefined wallet ensuring it never goes below default
+        predefined_wallet['percent'] = 100 - sum(w['percent'] for w in targets_list)
         targets_list.insert(0, predefined_wallet)
 
-        targets = {"targets": targets_list}
-        return targets
+        return {"targets": targets_list}
 
     except Exception as e:
         logger.error(f"Error creating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
+        
 @http_retry
 async def update_cyberherd_targets(targets):
     try:
@@ -693,7 +718,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
         # Check for Nostr data and handle CyberHerd addition
         nostr_data_raw = payment.get('extra', {}).get('nostr')
 
-        if nostr_data_raw and payment_amount:
+        if nostr_data_raw and payment_amount >= 10000:
             try:
                 nostr_data = json.loads(nostr_data_raw)
                 pubkey = nostr_data.get('pubkey')
@@ -918,20 +943,8 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
 
                 logger.debug(f"Parsed kinds for pubkey {pubkey}: {kinds_int}")
 
+                # Check if any special kind is present in the new data
                 if any(kind in [6, 7, 9734] for kind in kinds_int):
-                    if 9734 in kinds_int:
-                        payout_increment = calculate_payout(new_amount)
-                        logger.debug(f"Payout increment for pubkey {pubkey}: {payout_increment}")
-                    elif 7 in kinds_int:
-                        payout_increment = 0.05
-                        logger.debug(f"Payout increment for pubkey {pubkey}: {payout_increment}")
-                    elif 6 in kinds_int:
-                        payout_increment = 0.1
-                        logger.debug(f"Payout increment for pubkey {pubkey}: {payout_increment}")
-                    else:
-                        payout_increment = 0  # Default increment if no relevant kind
-                        logger.debug(f"No payout increment for pubkey {pubkey}")
-
                     fetch_info_query = "SELECT kinds, notified FROM cyber_herd WHERE pubkey = :pubkey"
                     row = await database.fetch_one(fetch_info_query, values={"pubkey": pubkey})
                     current_kinds_str = row["kinds"] if row and row["kinds"] else ""
@@ -943,15 +956,25 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                         except ValueError as ve:
                             logger.error(f"Error parsing current kinds for pubkey {pubkey}: {ve}")
 
-                    new_kinds_set = set(kinds_int)
-                    updated_kinds = current_kinds.union(new_kinds_set)
-                    updated_kinds_str = ','.join(map(str, sorted(updated_kinds)))
+                    # Determine which special kinds are new for this record
+                    new_special_kinds = [k for k in [9734, 7, 6] if k in kinds_int and k not in current_kinds]
+                    payout_increment = 0
+                    for k in new_special_kinds:
+                        if k == 9734:
+                            payout_increment += calculate_payout(new_amount)
+                        elif k == 7:
+                            payout_increment += 0.1
+                        elif k == 6:
+                            payout_increment += 0.2
 
-                    logger.debug(f"Updated kinds for pubkey {pubkey}: {updated_kinds_str}")
+                    logger.debug(f"New special kinds for pubkey {pubkey}: {new_special_kinds} with payout increment: {payout_increment}")
 
-                    if (notified_status is None or notified_status == "null") and updated_kinds_str != current_kinds_str:
+                    if notified_status is None:
+                        logger.debug(f"Condition met for pubkey {pubkey}: notified_status is None.")
                         spots_remaining = MAX_HERD_SIZE - current_herd_size
                         clamped_difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
+
+                        # Prepare message content and output
                         message_content, raw_command_output = await messaging.make_messages(
                             config['NOS_SEC'],
                             0,
@@ -960,8 +983,27 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
                             item_dict,
                             spots_remaining
                         )
-                        await send_messages_to_clients(message_content)
-                        await update_notified_field(pubkey, raw_command_output)
+
+                        try:
+                            # Attempt to send the message
+                            await send_messages_to_clients(message_content)
+                        except Exception as send_error:
+                            logger.error(f"Failed to send notification for pubkey {pubkey}: {send_error}")
+                        else:
+                            try:
+                                await update_notified_field(pubkey, raw_command_output)
+                                logger.debug(f"Notification sent and notified field updated for pubkey {pubkey}.")
+                            except Exception as update_error:
+                                logger.error(f"Failed to update notified field for pubkey {pubkey}: {update_error}")
+                    else:
+                        logger.debug(f"Notification condition not met for pubkey {pubkey}: notified_status is not None.")
+
+                    # Prepare updated kinds by merging new kinds with existing ones
+                    new_kinds_set = set(kinds_int)
+                    updated_kinds = current_kinds.union(new_kinds_set)
+                    updated_kinds_str = ','.join(map(str, sorted(updated_kinds)))
+
+                    logger.debug(f"Updated kinds for pubkey {pubkey}: {updated_kinds_str}")
 
                     update_query = """
                         UPDATE cyber_herd
