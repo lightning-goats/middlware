@@ -1,7 +1,7 @@
 from math import floor
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Dict, Set, Union, Tuple
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocket, WebSocketDisconnect
@@ -37,9 +37,8 @@ from tenacity import (
 import messaging
 from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag
 
-
 # Configuration and Constants
-MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 5))
+MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
 PRICE = float(os.getenv('PRICE', 1.00))
 LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
 OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
@@ -47,10 +46,10 @@ HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036a
 PREDEFINED_WALLET_ADDRESS = 'bolverker@strike.me'
 PREDEFINED_WALLET_ALIAS = 'Bolverker'
 PREDEFINED_WALLET_PERCENT_RESET = 100
-PREDEFINED_WALLET_PERCENT_DEFAULT = 90
+PREDEFINED_WALLET_PERCENT_DEFAULT = 80
 TRIGGER_AMOUNT_SATS = 1000
 
-notification_semaphore = asyncio.Semaphore(6) #limit concurrent notifications
+notification_semaphore = asyncio.Semaphore(6)  # limit concurrent notifications
 
 # Logging Configuration
 logging.basicConfig(
@@ -120,7 +119,7 @@ def load_env_vars(required_vars):
 required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
 config = load_env_vars(required_env_vars)
 
-#Cors middleware
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -224,8 +223,7 @@ class WebSocketManager:
                 try:
                     self.logger.debug(f"Received message: {message}")
                     payment_data = json.loads(message)
-                    background_tasks = BackgroundTasks()
-                    await process_payment_data(payment_data, background_tasks)
+                    await process_payment_data(payment_data)
                 except json.JSONDecodeError as e:
                     self.logger.error(f"Failed to decode WebSocket message: {e}")
                 except Exception as e:
@@ -291,13 +289,13 @@ async def startup():
         logger.warning("Initial WebSocket connection attempt timed out")
 
     try:
-            response = await get_balance_route(force_refresh=True)
-            app_state.balance = response.get("balance", 0)
+        response = await get_balance_route(force_refresh=True)
+        app_state.balance = response.get("balance", 0)
     except Exception as e:
-            logger.error(f"Failed to retrieve balance in startup_event: {e}. Defaulting to 0.")
-            app_state.balance = 0
+        logger.error(f"Failed to retrieve balance in startup_event: {e}. Defaulting to 0.")
+        app_state.balance = 0
 
-    # Connect to database and create tables (no 'messages' table anymore)
+    # Connect to database and create tables
     await database.connect()
     await database.execute('''
         CREATE TABLE IF NOT EXISTS cyber_herd (
@@ -330,7 +328,6 @@ async def startup():
     # Start periodic informational message task
     asyncio.create_task(periodic_informational_messages())
 
-
 async def schedule_daily_reset():
     while True:
         now = datetime.utcnow()
@@ -341,7 +338,6 @@ async def schedule_daily_reset():
         if app_state.balance and app_state.balance >= TRIGGER_AMOUNT_SATS:
             await send_payment(app_state.balance)
                         
-
 class DatabaseCache:
     def __init__(self, db):
         self.db = db
@@ -410,15 +406,9 @@ async def periodic_informational_messages():
             await send_messages_to_clients(message)
 
 def calculate_payout(amount: float) -> float:
-    """
-    Calculate payout increment based on the given amount in sats.
-    Amounts under 100 sats count as 0.1, and each additional 100 sats adds another 0.1,
-    capping at 1.0 for 1000 sats or more.
-    """
-    # Round up to the nearest hundred sats, capped at 1000 sats (i.e., 10 units)
     units = (amount + 99) // 100  # ceiling division for multiples of 100
-    units = min(units, 10)  # cap at 10 units (for 1000 sats or more)
-    return units * 0.1
+    units = min(units, 10)       # cap at 10 units (for 1000 sats or more)
+    return units * 0.2
 
 @http_retry
 async def fetch_cyberherd_targets():
@@ -430,8 +420,6 @@ async def fetch_cyberherd_targets():
     response = await http_client.get(url, headers=headers)
     response.raise_for_status()
     return response.json()
-
-from math import floor
 
 @http_retry
 async def create_cyberherd_targets(new_targets_data, initial_targets):
@@ -453,55 +441,59 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
                 combined_wallets.append({'wallet': wallet, 'alias': name, 'payouts': payouts})
 
         total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
-
-        # Calculate fixed total allocation for non-predefined wallets
         max_allocation = 100 - PREDEFINED_WALLET_PERCENT_DEFAULT
-        total_allocation = max_allocation
-
-        # Dynamically cap the number of wallets to ensure each can get at least 2% (because split payments fails below that)
-        min_percent_per_wallet = 1
+        min_percent_per_wallet = 2
         max_wallets_allowed = floor(max_allocation / min_percent_per_wallet)
+
+        # Cap the number of wallets so each can get at least 2%
         if len(combined_wallets) > max_wallets_allowed:
-            combined_wallets = sorted(combined_wallets, key=lambda x: x['payouts'], reverse=True)[:max_wallets_allowed]
+            combined_wallets = sorted(
+                combined_wallets,
+                key=lambda x: x['payouts'],
+                reverse=True
+            )[:max_wallets_allowed]
             total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
 
-        # Assign baseline minimum (2%) to each non-predefined wallet
+        # Assign baseline minimum (2%) to each wallet
         for wallet in combined_wallets:
             wallet['percent'] = min_percent_per_wallet
         allocated = min_percent_per_wallet * len(combined_wallets)
-        remaining_allocation = total_allocation - allocated
+        remaining_allocation = max_allocation - allocated
 
-        # Distribute remaining allocation proportionally using floor
+        # Distribute remaining allocation proportionally
         additional_allocations = []
         for wallet in combined_wallets:
             prop = wallet['payouts'] / total_payouts
-            # Calculate additional allocation based on proportion
             additional = prop * remaining_allocation
             additional_allocations.append((wallet, additional))
 
-        # Assign whole percentages from additional allocation using floor
+        # Assign floor of proportional allocation
         for wallet, additional in additional_allocations:
             add_percent = floor(additional)
             wallet['percent'] += add_percent
 
-        # Handle leftover percentages due to flooring
         allocated_percent = sum(w['percent'] for w in combined_wallets)
-        leftover = total_allocation - allocated_percent
+        leftover = max_allocation - allocated_percent
 
-        # Distribute leftover percentages one by one to wallets with highest fractional remainders
+        # Distribute leftover percentages one by one
         if leftover > 0:
             remainders = []
             for wallet, additional in additional_allocations:
-                fractional_part = additional - floor(additional)
+                fractional_part = additional - math.floor(additional)
                 remainders.append((fractional_part, wallet))
+
+            # Sort descending by fractional_part
             remainders.sort(reverse=True, key=lambda x: x[0])
-            for i in range(int(leftover)):
-                # Increase percent for wallets with highest remainders without using ceil
-                remainders[i][1]['percent'] += 1
+
+            num_wallets = len(remainders)
+            if num_wallets > 0:
+                # Round-robin distribution of leftover
+                for i in range(int(leftover)):
+                    index = i % num_wallets
+                    remainders[index][1]['percent'] += 1
+
 
         targets_list = combined_wallets
-
-        # Allocate remaining percent to predefined wallet ensuring it never goes below default
         predefined_wallet['percent'] = 100 - sum(w['percent'] for w in targets_list)
         targets_list.insert(0, predefined_wallet)
 
@@ -526,59 +518,21 @@ async def update_cyberherd_targets(targets):
         return response.json()
     except httpx.HTTPError as e:
         logger.error(f"HTTP error updating cyberherd targets: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to update cyberherd targets")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500,
+            detail="Failed to update cyberherd targets"
+        )
     except Exception as e:
         logger.error(f"Error updating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-async def notify_new_members(new_members, difference, current_herd_size):
-    async with notification_semaphore:
-        for item_dict in new_members:
-            try:
-                logger.info(f"Notifying member with pubkey: {item_dict['pubkey']}")
-
-                spots_remaining = MAX_HERD_SIZE - current_herd_size
-
-                message_content, raw_command_output = await messaging.make_messages(
-                    config['NOS_SEC'],
-                    0,  # Amount placeholder
-                    difference,
-                    "cyber_herd",
-                    item_dict,
-                    spots_remaining
-                )
-                await send_messages_to_clients(message_content)
-
-                # Use the new helper function to update the 'notified' field
-                await update_notified_field(item_dict['pubkey'], raw_command_output)
-
-            except Exception as e:
-                logger.exception(f"Error while notifying and updating for pubkey: {item_dict.get('pubkey', 'unknown')}")
-
-async def update_notified_field(pubkey: str, raw_command_output: str):
-    """
-    Update the 'notified' field in the cyber_herd table for a given pubkey using
-    information extracted from raw_command_output.
-    """
-    update_notified_query = """
-        UPDATE cyber_herd 
-        SET notified = :notified_value 
-        WHERE pubkey = :pubkey
-    """
-    notified_value = "notified"  # Default marker
-    try:
-        command_output_json = json.loads(raw_command_output)
-        # Use the 'id' from the command output if available
-        notified_value = command_output_json.get("id", "notified")
-    except Exception:
-        pass
-    await database.execute(update_notified_query, values={"notified_value": notified_value, "pubkey": pubkey})
-
-
 @http_retry
 async def get_balance(force_refresh=False):
     try:
-        response = await http_client.get(f'{LNBITS_URL}/api/v1/wallet', headers={'X-Api-Key': config['HERD_KEY']})
+        response = await http_client.get(
+            f'{LNBITS_URL}/api/v1/wallet',
+            headers={'X-Api-Key': config['HERD_KEY']}
+        )
         response.raise_for_status()
         balance = response.json()['balance']
         
@@ -588,7 +542,10 @@ async def get_balance(force_refresh=False):
             
     except httpx.HTTPError as e:
         logger.error(f"HTTP error retrieving balance: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to retrieve balance")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500,
+            detail="Failed to retrieve balance"
+        )
     except Exception as e:
         logger.error(f"Error retrieving balance: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -605,7 +562,10 @@ async def fetch_btc_price():
         return btc_price
     except httpx.HTTPError as e:
         logger.error(f"HTTP error fetching BTC price: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to fetch BTC price")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500,
+            detail="Failed to fetch BTC price"
+        )
     except Exception as e:
         logger.error(f"Error fetching BTC price: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -621,7 +581,10 @@ async def convert_to_sats(amount: float):
         return sats
     except httpx.HTTPError as e:
         logger.error(f"HTTP error converting amount: {e}")
-        raise HTTPException(status_code=response.status_code, detail="Failed to convert amount")
+        raise HTTPException(
+            status_code=response.status_code if e.response else 500,
+            detail="Failed to convert amount"
+        )
     except Exception as e:
         logger.error(f"Error converting amount: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -674,12 +637,18 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
 @http_retry
 async def is_feeder_override_enabled():
     try:
-        response = await http_client.get(f'{OPENHAB_URL}/rest/items/FeederOverride/state', auth=(config['OH_AUTH_1'], ''))
+        response = await http_client.get(
+            f'{OPENHAB_URL}/rest/items/FeederOverride/state',
+            auth=(config['OH_AUTH_1'], '')
+        )
         response.raise_for_status()
         return response.text.strip() == 'ON'
     except httpx.HTTPError as e:
         logger.error(f"HTTP error checking feeder status: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to check feeder status")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500,
+            detail="Failed to check feeder status"
+        )
     except Exception as e:
         logger.error(f"Error checking feeder status: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -687,12 +656,18 @@ async def is_feeder_override_enabled():
 @http_retry
 async def trigger_feeder():
     try:
-        response = await http_client.post(f'{OPENHAB_URL}/rest/rules/88bd9ec4de/runnow', auth=(config['OH_AUTH_1'], ''))
+        response = await http_client.post(
+            f'{OPENHAB_URL}/rest/rules/88bd9ec4de/runnow',
+            auth=(config['OH_AUTH_1'], '')
+        )
         response.raise_for_status()
         return response.status_code == 200
     except httpx.HTTPError as e:
         logger.error(f"HTTP error triggering feeder: {e}")
-        raise HTTPException(status_code=e.response.status_code if e.response else 500, detail="Failed to trigger the feeder rule")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response else 500,
+            detail="Failed to trigger the feeder rule"
+        )
     except Exception as e:
         logger.error(f"Error triggering the feeder rule: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -703,8 +678,11 @@ async def trigger_feeder():
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(Exception)
 )
-
-async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
+async def process_payment_data(payment_data):
+    """
+    Updated process_payment_data to preserve amount/difference/spots_remaining usage
+    while still allowing a 'cyber_herd' path for new members and feeder logic.
+    """
     try:
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
@@ -717,6 +695,8 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 
         # Check for Nostr data and handle CyberHerd addition
         nostr_data_raw = payment.get('extra', {}).get('nostr')
+        feeder_triggered = False
+        new_cyberherd_record_created = False
 
         if nostr_data_raw and payment_amount >= 10000:
             try:
@@ -728,13 +708,13 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                 event_kind = nostr_data.get('kind')
                 kinds = [event_kind]
 
-                amount = payment_amount / 1000
+                amount_sats = payment_amount / 1000
 
                 # Extract the 'e' tag (zapped note ID)
                 event_id = next((tag[1] for tag in nostr_data.get('tags', []) if tag[0] == 'e'), None)
 
                 if pubkey and event_id:
-                    # Check for CyberHerd tag using the module function
+                    # Check for CyberHerd tag
                     if await check_cyberherd_tag(event_id):
                         # Fetch metadata for the pubkey
                         metadata_fetcher = MetadataFetcher()
@@ -766,43 +746,50 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                                         display_name=display_name,
                                         event_id=event_id,
                                         note=note,
-                                        kinds=kinds,            # Use the extracted kind(s) here
+                                        kinds=kinds,
                                         pubkey=pubkey,
                                         nprofile=nprofile,
                                         lud16=lud16,
                                         notified=None,
                                         payouts=0.0,
-                                        amount=amount
+                                        amount=amount_sats
                                     )
 
                                     logger.info(f"Calling update_cyber_herd() with {new_member_data}")
-                                    result = await update_cyber_herd([new_member_data], background_tasks)
+                                    result = await update_cyber_herd([new_member_data])
+                                    if result and result.get("new_members_added", 0) > 0:
+                                        new_cyberherd_record_created = True
                         else:
                             logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
                     else:
                         logger.info(f"No 'CyberHerd' tag found for event_id: {event_id}")
                 else:
-                    logger.warning("Missing pubkey or event_id in Nostr data. Processing as a normal payment.")
+                    logger.warning("Missing pubkey or event_id in Nostr data. Processing as normal payment.")
             except json.JSONDecodeError:
                 logger.error("Invalid JSON in Nostr data.")
             except Exception as e:
                 logger.error(f"Error processing Nostr data: {e}")
 
-        # Check for feeder trigger. (always checked regardless)
+        # Check for feeder trigger (regardless of new membership)
         if payment_amount > 0 and not await is_feeder_override_enabled():
             if app_state.balance >= TRIGGER_AMOUNT_SATS:
                 if await trigger_feeder():
+                    feeder_triggered = True
+                    logger.info("Feeder triggered successfully.")
+
                     status = await send_payment(app_state.balance)
                     if status['success']:
-                        # Send a message to websockets
-                        message, _ = await messaging.make_messages(
+                        # Send a "feeder_triggered" message
+                        feeder_msg, _ = await messaging.make_messages(
                             config['NOS_SEC'],
-                            int(payment_amount / 1000), 0, "feeder_triggered"
+                            int(payment_amount / 1000),
+                            0,
+                            "feeder_triggered"
                         )
-                        await send_messages_to_clients(message)
+                        await send_messages_to_clients(feeder_msg)
 
-            # Execute "sats_received" logic for non-zaps or zaps without CyberHerd match
-            else:
+            # If feeder not triggered, do the usual "sats_received" fallback if no new members
+            if not feeder_triggered and not new_cyberherd_record_created:
                 difference = TRIGGER_AMOUNT_SATS - app_state.balance
                 if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
@@ -813,7 +800,7 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
                     )
                     await send_messages_to_clients(message)
         else:
-            logger.info("Feeder override is ON or payment amount is non-positive. Skipping.")
+            logger.info("Feeder override is ON or payment amount is non-positive. Skipping feeder logic.")
 
     except Exception as e:
         logger.error(f"Error processing payment data: {e}")
@@ -822,7 +809,6 @@ async def process_payment_data(payment_data, background_tasks: BackgroundTasks):
 @http_retry
 async def send_payment(balance: int):
     memo = 'Reset Herd Wallet'
-    
     try:
         payment_request = await create_invoice(balance, memo)
         payment_status = await pay_invoice(payment_request)
@@ -853,11 +839,21 @@ async def create_invoice_route(
         logger.error(f"Error in /create-invoice route: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+# ---------------------------------------------------------------------------
+#                     REFACTORED CYBER HERD ENDPOINT & HELPERS
+# ---------------------------------------------------------------------------
+
 @app.post("/cyber_herd")
-async def update_cyber_herd(data: List[CyberHerdData], background_tasks: BackgroundTasks):
+async def update_cyber_herd(data: List[CyberHerdData]):
+    """
+    Refactored endpoint for adding/updating CyberHerd members, using real 'amount',
+    'difference', 'spots_remaining' as before. Sends 'cyber_herd' messages and 
+    schedules notifications for new/special members.
+    """
     try:
         should_get_balance = any(9734 not in item.kinds for item in data)
 
+        # Get current herd size once
         query = "SELECT COUNT(*) as count FROM cyber_herd"
         result = await database.fetch_one(query)
         current_herd_size = result['count']
@@ -866,8 +862,8 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
             logger.info(f"Herd full: {current_herd_size} members")
             return {"status": "herd full"}
 
-        new_members = []
-        targets_to_create = []
+        members_to_notify = []
+        targets_to_update = []
 
         for item in data:
             item_dict = item.dict()
@@ -875,207 +871,56 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
 
             logger.debug(f"Processing pubkey: {pubkey} with kinds: {item_dict['kinds']}")
 
-            check_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE pubkey = :pubkey"
-            result = await database.fetch_one(check_query, values={"pubkey": pubkey})
+            # Check if member exists
+            check_query = """
+                SELECT COUNT(*) as count, kinds, notified 
+                FROM cyber_herd 
+                WHERE pubkey = :pubkey
+            """
+            member_record = await database.fetch_one(
+                check_query, 
+                values={"pubkey": pubkey}
+            )
 
-            if result['count'] == 0 and current_herd_size < MAX_HERD_SIZE:
-                item_dict['notified'] = None
-                # Ensure 'kinds' is a list before joining
-                if isinstance(item_dict['kinds'], list):
-                    item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
-                elif isinstance(item_dict['kinds'], str):
-                    # If it's already a string, ensure it's correctly formatted
-                    item_dict['kinds'] = item_dict['kinds'].strip()
-                else:
-                    logger.warning(f"Unexpected type for 'kinds': {type(item_dict['kinds'])}")
-                    item_dict['kinds'] = ''
-
-                new_members.append(item_dict)
-
-                # Insert new member into the database
-                insert_query = """
-                    INSERT INTO cyber_herd (
-                        pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts, amount
-                    ) VALUES (
-                        :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts, :amount
-                    )
-                """
-                try:
-                    await database.execute(insert_query, values={
-                        "pubkey": item_dict["pubkey"],
-                        "display_name": item_dict.get("display_name") or "Anon",
-                        "event_id": item_dict.get("event_id"),
-                        "note": item_dict.get("note"),
-                        "kinds": item_dict["kinds"],
-                        "nprofile": item_dict.get("nprofile"),
-                        "lud16": item_dict.get("lud16"),
-                        "notified": None,
-                        "payouts": item_dict.get("payouts", 0.0),
-                        "amount": item_dict.get("amount", 0)
-                    })
-                    logger.info(f"Inserted new member with pubkey: {pubkey}")
-                except Exception as e:
-                    logger.error(f"Failed to insert new member with pubkey {pubkey}: {e}")
-                    continue  # Skip to the next member without incrementing herd size
-
-                if item_dict['lud16']:
-                    targets_to_create.append({
-                        'wallet': item_dict['lud16'],
-                        'alias': item_dict['pubkey'],
-                    })
-
+            if member_record['count'] == 0 and current_herd_size < MAX_HERD_SIZE:
+                await process_new_member(
+                    item_dict=item_dict,
+                    members_to_notify=members_to_notify,
+                    targets_to_update=targets_to_update
+                )
                 current_herd_size += 1
 
-            elif result['count'] > 0:
-                new_amount = item_dict.get('amount', 0)
-                # Correctly parse 'kinds' as list of ints
-                if isinstance(item.kinds, list):
-                    kinds_int = item.kinds
-                elif isinstance(item.kinds, str):
-                    try:
-                        kinds_int = [int(k.strip()) for k in item.kinds.split(',') if k.strip().isdigit()]
-                    except ValueError as ve:
-                        logger.error(f"Error parsing 'kinds' for pubkey {pubkey}: {ve}")
-                        continue
-                else:
-                    logger.warning(f"Unexpected type for 'kinds': {type(item.kinds)} for pubkey {pubkey}")
-                    kinds_int = []
+            elif member_record['count'] > 0:
+                await process_existing_member(
+                    item_dict=item_dict,
+                    item=item,
+                    result=member_record,
+                    members_to_notify=members_to_notify,
+                    targets_to_update=targets_to_update
+                )
 
-                logger.debug(f"Parsed kinds for pubkey {pubkey}: {kinds_int}")
-
-                # Check if any special kind is present in the new data
-                if any(kind in [6, 7, 9734] for kind in kinds_int):
-                    fetch_info_query = "SELECT kinds, notified FROM cyber_herd WHERE pubkey = :pubkey"
-                    row = await database.fetch_one(fetch_info_query, values={"pubkey": pubkey})
-                    current_kinds_str = row["kinds"] if row and row["kinds"] else ""
-                    notified_status = row["notified"] if row else None
-                    current_kinds = set()
-                    if current_kinds_str:
-                        try:
-                            current_kinds = set(map(int, current_kinds_str.split(',')))
-                        except ValueError as ve:
-                            logger.error(f"Error parsing current kinds for pubkey {pubkey}: {ve}")
-
-                    # Determine which special kinds are new for this record
-                    new_special_kinds = [k for k in [9734, 7, 6] if k in kinds_int and k not in current_kinds]
-                    payout_increment = 0
-                    for k in new_special_kinds:
-                        if k == 9734:
-                            payout_increment += calculate_payout(new_amount)
-                        elif k == 7:
-                            payout_increment += 0.1
-                        elif k == 6:
-                            payout_increment += 0.2
-
-                    logger.debug(f"New special kinds for pubkey {pubkey}: {new_special_kinds} with payout increment: {payout_increment}")
-
-                    if notified_status is None:
-                        logger.debug(f"Condition met for pubkey {pubkey}: notified_status is None.")
-                        spots_remaining = MAX_HERD_SIZE - current_herd_size
-                        clamped_difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
-
-                        # Prepare message content and output
-                        message_content, raw_command_output = await messaging.make_messages(
-                            config['NOS_SEC'],
-                            0,
-                            clamped_difference,
-                            "cyber_herd",
-                            item_dict,
-                            spots_remaining
-                        )
-
-                        try:
-                            # Attempt to send the message
-                            await send_messages_to_clients(message_content)
-                        except Exception as send_error:
-                            logger.error(f"Failed to send notification for pubkey {pubkey}: {send_error}")
-                        else:
-                            try:
-                                await update_notified_field(pubkey, raw_command_output)
-                                logger.debug(f"Notification sent and notified field updated for pubkey {pubkey}.")
-                            except Exception as update_error:
-                                logger.error(f"Failed to update notified field for pubkey {pubkey}: {update_error}")
-                    else:
-                        logger.debug(f"Notification condition not met for pubkey {pubkey}: notified_status is not None.")
-
-                    # Prepare updated kinds by merging new kinds with existing ones
-                    new_kinds_set = set(kinds_int)
-                    updated_kinds = current_kinds.union(new_kinds_set)
-                    updated_kinds_str = ','.join(map(str, sorted(updated_kinds)))
-
-                    logger.debug(f"Updated kinds for pubkey {pubkey}: {updated_kinds_str}")
-
-                    update_query = """
-                        UPDATE cyber_herd
-                        SET amount = amount + :new_amount,
-                            payouts = payouts + :payout_increment,
-                            kinds = :updated_kinds,
-                            event_id = :event_id,
-                            note = :note,
-                            display_name = :display_name,
-                            nprofile = :nprofile,
-                            lud16 = :lud16
-                        WHERE pubkey = :pubkey
-                    """
-                    try:
-                        await database.execute(update_query, values={
-                            "new_amount": new_amount,
-                            "payout_increment": payout_increment,
-                            "updated_kinds": updated_kinds_str,
-                            "event_id": item_dict.get("event_id"),
-                            "note": item_dict.get("note"),
-                            "display_name": item_dict.get("display_name") or "Anon",
-                            "nprofile": item_dict.get("nprofile"),
-                            "lud16": item_dict.get("lud16"),
-                            "pubkey": pubkey
-                        })
-                        logger.info(f"Updated member with pubkey: {pubkey}")
-                    except Exception as e:
-                        logger.error(f"Failed to update member with pubkey {pubkey}: {e}")
-                        continue
-
-        # Recalculate and update LNbits targets using the current database state
-        try:
-            initial_targets = await fetch_cyberherd_targets()
-            current_members = await database.fetch_all(
-                "SELECT lud16, pubkey, payouts FROM cyber_herd WHERE lud16 IS NOT NULL"
-            )
-            all_targets = [
-                {
-                    'wallet': member['lud16'],
-                    'alias': member['pubkey'],
-                    'payouts': member['payouts']
-                }
-                for member in current_members
-            ]
-
-            targets = await create_cyberherd_targets(new_targets_data=all_targets, initial_targets=initial_targets)
-            if targets:
-                await update_cyberherd_targets(targets)
-                logger.info("LNbits targets updated successfully.")
-            else:
-                logger.warning("No targets to update for LNbits.")
-        except Exception as e:
-            logger.error(f"Failed to update LNbits targets: {e}")
+        # Recalculate LNbits targets if needed
+        if targets_to_update:
+            await update_lnbits_targets(targets_to_update)
 
         # Update balance if needed
         if should_get_balance:
-            try:
-                response = await get_balance_route(force_refresh=True)
-                balance_value = response.get("balance", 0)
-                async with app_state.lock:
-                    app_state.balance = int(balance_value / 1000)
-                logger.info(f"Updated balance to {app_state.balance}")
-            except Exception as e:
-                logger.error(f"Failed to update balance: {e}")
+            await update_system_balance()
 
-        difference_raw = TRIGGER_AMOUNT_SATS - app_state.balance
-        difference = max(0, difference_raw)
+        difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
 
-        background_tasks.add_task(notify_new_members, new_members, difference, current_herd_size)
-        logger.info(f"Added task to notify new members: {len(new_members)}")
+        # Schedule notifications in one task
+        if members_to_notify:
+            await process_notifications(
+                members_to_notify,
+                difference,
+                current_herd_size
+            )
 
-        return {"status": "success", "new_members_added": len(new_members)}
+        return {
+            "status": "success",
+            "new_members_added": len([m for m in members_to_notify if m['type'] == 'new_member'])
+        }
 
     except HTTPException as e:
         logger.error(f"HTTPException in update_cyber_herd: {e.detail}")
@@ -1083,6 +928,305 @@ async def update_cyber_herd(data: List[CyberHerdData], background_tasks: Backgro
     except Exception as e:
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+async def process_new_member(
+    item_dict: dict, 
+    members_to_notify: list, 
+    targets_to_update: list
+):
+    """Insert a brand-new member into the database and mark for LNbits updates."""
+    pubkey = item_dict['pubkey']
+    item_dict['notified'] = None
+    
+    # Convert 'kinds' to a comma-separated string if needed
+    if isinstance(item_dict['kinds'], list):
+        item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
+    elif isinstance(item_dict['kinds'], str):
+        item_dict['kinds'] = item_dict['kinds'].strip()
+    else:
+        logger.warning(f"Unexpected type for 'kinds': {type(item_dict['kinds'])}")
+        item_dict['kinds'] = ''
+
+    insert_query = """
+        INSERT INTO cyber_herd (
+            pubkey, display_name, event_id, note, kinds, nprofile, lud16, 
+            notified, payouts, amount
+        ) VALUES (
+            :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, 
+            :lud16, :notified, :payouts, :amount
+        )
+    """
+    try:
+        await database.execute(insert_query, values={
+            "pubkey": item_dict["pubkey"],
+            "display_name": item_dict.get("display_name") or "Anon",
+            "event_id": item_dict.get("event_id"),
+            "note": item_dict.get("note"),
+            "kinds": item_dict["kinds"],
+            "nprofile": item_dict.get("nprofile"),
+            "lud16": item_dict.get("lud16"),
+            "notified": None,
+            "payouts": item_dict.get("payouts", 0.0),
+            "amount": item_dict.get("amount", 0)
+        })
+        
+        # Mark this new member for notification
+        members_to_notify.append({
+            'pubkey': pubkey,
+            'type': 'new_member',
+            'data': item_dict
+        })
+        
+        # If they have a lud16, update LNbits targets
+        if item_dict['lud16']:
+            targets_to_update.append({
+                'wallet': item_dict['lud16'],
+                'alias': pubkey,
+                'payouts': item_dict.get("payouts", 0.0)
+            })
+        
+        logger.info(f"Inserted new member with pubkey: {pubkey}")
+    except Exception as e:
+        logger.error(f"Failed to insert new member with pubkey {pubkey}: {e}")
+
+
+async def process_existing_member(
+    item_dict: dict, 
+    item: CyberHerdData, 
+    result: dict,
+    members_to_notify: list, 
+    targets_to_update: list
+):
+    """Handle updates to an existing member in the cyber herd."""
+    pubkey = item_dict['pubkey']
+    new_amount = item_dict.get('amount', 0)
+
+    kinds_int = parse_kinds(item.kinds)
+    if not kinds_int:
+        return
+
+    logger.debug(f"Parsed kinds for pubkey {pubkey}: {kinds_int}")
+
+    # Check if new special kinds arrived
+    if any(kind in [6, 7, 9734] for kind in kinds_int):
+        current_kinds = parse_current_kinds(result["kinds"])
+        
+        payout_increment, updated_kinds_str = calculate_member_updates(
+            kinds_int, current_kinds, new_amount
+        )
+
+        # Notify if the member wasn't previously "notified"
+        if result["notified"] is None:
+            members_to_notify.append({
+                'pubkey': pubkey,
+                'type': 'special_kinds',
+                'data': {
+                    **item_dict,
+                    'payout_increment': payout_increment
+                }
+            })
+
+        await update_member_record(
+            pubkey=pubkey,
+            new_amount=new_amount,
+            payout_increment=payout_increment,
+            updated_kinds=updated_kinds_str,
+            item_dict=item_dict
+        )
+
+        if item_dict['lud16']:
+            targets_to_update.append({
+                'wallet': item_dict['lud16'],
+                'alias': pubkey,
+                'payouts': payout_increment
+            })
+
+def parse_kinds(kinds: Union[List[int], str]) -> List[int]:
+    """Parse 'kinds' into a list of ints."""
+    if isinstance(kinds, list):
+        return kinds
+    elif isinstance(kinds, str):
+        try:
+            return [int(k.strip()) for k in kinds.split(',') if k.strip().isdigit()]
+        except ValueError as e:
+            logger.error(f"Error parsing kinds string: {e}")
+            return []
+    else:
+        logger.warning(f"Unexpected type for 'kinds': {type(kinds)}")
+        return []
+
+def parse_current_kinds(kinds_str: str) -> Set[int]:
+    """Parse DB 'kinds' string into a set of ints."""
+    if not kinds_str:
+        return set()
+    try:
+        return set(int(k.strip()) for k in kinds_str.split(',') if k.strip().isdigit())
+    except ValueError as e:
+        logger.error(f"Error parsing current kinds: {e}")
+        return set()
+
+def calculate_member_updates(
+    kinds_int: List[int],
+    current_kinds: Set[int],
+    new_amount: int
+) -> Tuple[float, str]:
+
+    new_special_kinds = [k for k in [9734, 7, 6] if k in kinds_int and k not in current_kinds]
+    payout_increment = 0
+    for k in new_special_kinds:
+        if k == 9734:
+            payout_increment += calculate_payout(float(new_amount))
+        elif k == 7:
+            payout_increment += 0.1
+        elif k == 6:
+            payout_increment += 0.2
+
+    updated_kinds_set = current_kinds.union(set(kinds_int))
+    updated_kinds_str = ','.join(map(str, sorted(updated_kinds_set)))
+    return payout_increment, updated_kinds_str
+
+async def update_member_record(
+    pubkey: str,
+    new_amount: float,
+    payout_increment: float,
+    updated_kinds: str,
+    item_dict: dict
+):
+    """Perform the DB update for an existing member."""
+    update_query = """
+        UPDATE cyber_herd
+        SET amount = amount + :new_amount,
+            payouts = payouts + :payout_increment,
+            kinds = :updated_kinds,
+            event_id = :event_id,
+            note = :note,
+            display_name = :display_name,
+            nprofile = :nprofile,
+            lud16 = :lud16
+        WHERE pubkey = :pubkey
+    """
+    try:
+        await database.execute(update_query, values={
+            "new_amount": new_amount,
+            "payout_increment": payout_increment,
+            "updated_kinds": updated_kinds,
+            "event_id": item_dict.get("event_id"),
+            "note": item_dict.get("note"),
+            "display_name": item_dict.get("display_name") or "Anon",
+            "nprofile": item_dict.get("nprofile"),
+            "lud16": item_dict.get("lud16"),
+            "pubkey": pubkey
+        })
+        logger.info(f"Updated member with pubkey: {pubkey}")
+    except Exception as e:
+        logger.error(f"Failed to update member with pubkey {pubkey}: {e}")
+
+async def update_lnbits_targets(targets: List[dict]):
+    """
+    Fetch existing LNbits targets, merge with current DB data,
+    and update LNbits in one shot.
+    """
+    try:
+        initial_targets = await fetch_cyberherd_targets()
+        current_members = await database.fetch_all(
+            "SELECT lud16, pubkey, payouts FROM cyber_herd WHERE lud16 IS NOT NULL"
+        )
+        
+        all_targets = [
+            {
+                'wallet': member['lud16'],
+                'alias': member['pubkey'],
+                'payouts': member['payouts']
+            }
+            for member in current_members
+        ]
+
+        updated_targets = await create_cyberherd_targets(
+            new_targets_data=all_targets,
+            initial_targets=initial_targets
+        )
+        
+        if updated_targets:
+            await update_cyberherd_targets(updated_targets)
+            logger.info("LNbits targets updated successfully.")
+        else:
+            logger.warning("No targets to update for LNbits.")
+    except Exception as e:
+        logger.error(f"Failed to update LNbits targets: {e}")
+
+async def update_system_balance():
+    """Refresh the LNbits wallet balance in the global app_state."""
+    try:
+        response = await get_balance_route(force_refresh=True)
+        balance_value = response.get("balance", 0)
+        async with app_state.lock:
+            app_state.balance = int(balance_value / 1000)
+        logger.info(f"Updated balance to {app_state.balance}")
+    except Exception as e:
+        logger.error(f"Failed to update balance: {e}")
+
+async def process_notifications(
+    members_to_notify: List[dict],
+    difference: int,
+    current_herd_size: int
+):
+    try:
+        async with notification_semaphore:
+            for member in members_to_notify:
+                pubkey = member.get('pubkey', 'unknown')
+                member_type = member.get('type', 'unspecified')
+                member_data = member.get('data', {})
+
+                try:
+                    spots_remaining = MAX_HERD_SIZE - current_herd_size
+
+                    # Call make_messages for "cyber_herd"
+                    message_content, raw_command_output = await messaging.make_messages(
+                        config['NOS_SEC'],
+                        member_data.get('amount', 0),
+                        difference,
+                        "cyber_herd",
+                        member_data,
+                        spots_remaining
+                    )
+
+                    # Broadcast the message
+                    await send_messages_to_clients(message_content)
+
+                    # Update the 'notified' field in DB
+                    await update_notified_field(pubkey, raw_command_output)
+
+                except Exception as e:
+                    # Log exceptions for each individual member
+                    logger.exception(f"Failed to process notification for {member_type} - {pubkey}: {e}")
+
+    except Exception as e:
+        # Log any higher-level failures in the
+        logger.exception(f"process_notifications failed with an error: {e}")
+
+async def update_notified_field(pubkey: str, raw_command_output: str):
+    """
+    Update the 'notified' field with the 'id' from the raw_command_output (or default).
+    """
+    update_notified_query = """
+        UPDATE cyber_herd 
+        SET notified = :notified_value 
+        WHERE pubkey = :pubkey
+    """
+    notified_value = "notified"
+    try:
+        command_output_json = json.loads(raw_command_output)
+        notified_value = command_output_json.get("id", "notified")
+    except Exception:
+        pass
+
+    await database.execute(
+        update_notified_query,
+        values={"notified_value": notified_value, "pubkey": pubkey}
+    )
+# ---------------------------------------------------------------------------
+
 
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
