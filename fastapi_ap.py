@@ -19,6 +19,7 @@ import time
 from databases import Database
 import websockets
 from asyncio import Lock, Event
+
 from websockets.exceptions import (
     ConnectionClosedError,
     ConnectionClosedOK,
@@ -32,22 +33,28 @@ from tenacity import (
     retry_if_exception_type,
     before_log,
     wait_fixed,
+    AsyncRetrying,
 )
 
 import messaging
-from cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag
+from utils.cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag
+from utils.nostr_signing import sign_event, sign_zap_event
 
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
-PRICE = float(os.getenv('PRICE', 1.00))
-LNBITS_URL = os.getenv('LNBITS_URL', 'http://127.0.0.1:3002')
-OPENHAB_URL = os.getenv('OPENHAB_URL', 'http://10.8.0.6:8080')
-HERD_WEBSOCKET = os.getenv('HERD_WEBSOCKET', "ws://127.0.0.1:3002/api/v1/ws/036ad4bb0dcb4b8c952230ab7b47ea52")
-PREDEFINED_WALLET_ADDRESS = 'bolverker@strike.me'
-PREDEFINED_WALLET_ALIAS = 'Bolverker'
 PREDEFINED_WALLET_PERCENT_RESET = 100
 PREDEFINED_WALLET_PERCENT_DEFAULT = 80
 TRIGGER_AMOUNT_SATS = 1000
+
+def load_env_vars(required_vars):
+    load_dotenv()
+    missing_vars = [var for var in required_vars if os.getenv(var) is None]
+    if missing_vars:
+        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+    return {var: os.getenv(var) for var in required_vars}
+
+required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'NOS_SEC', 'HEX_KEY', 'CYBERHERD_KEY', 'LNBITS_URL', 'OPENHAB_URL', 'HERD_WEBSOCKET', 'PREDEFINED_WALLET_ADDRESS','PREDEFINED_WALLET_ALIAS']
+config = load_env_vars(required_env_vars)
 
 notification_semaphore = asyncio.Semaphore(6)  # limit concurrent notifications
 
@@ -109,16 +116,6 @@ class CyberHerdTreats(BaseModel):
 class PaymentRequest(BaseModel):
     balance: int
 
-def load_env_vars(required_vars):
-    load_dotenv()
-    missing_vars = [var for var in required_vars if os.getenv(var) is None]
-    if missing_vars:
-        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
-    return {var: os.getenv(var) for var in required_vars}
-
-required_env_vars = ['OH_AUTH_1', 'HERD_KEY', 'SAT_KEY', 'NOS_SEC', 'CYBERHERD_KEY']
-config = load_env_vars(required_env_vars)
-
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -126,8 +123,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-from tenacity import AsyncRetrying
 
 http_retry = retry(
     reraise=True,
@@ -269,7 +264,7 @@ class WebSocketManager:
         await self.connect()
 
 websocket_manager = WebSocketManager(
-    uri=HERD_WEBSOCKET,
+    uri=config['HERD_WEBSOCKET'],
     logger=logger,
     max_retries=5
 )
@@ -334,8 +329,10 @@ async def schedule_daily_reset():
         next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         sleep_seconds = (next_midnight - now).total_seconds()
         await asyncio.sleep(sleep_seconds)
+
+        status = await reset_cyber_herd()
         
-        if app_state.balance and app_state.balance >= TRIGGER_AMOUNT_SATS:
+        if status['success'] and app_state.balance:
             await send_payment(app_state.balance)
                         
 class DatabaseCache:
@@ -408,11 +405,11 @@ async def periodic_informational_messages():
 def calculate_payout(amount: float) -> float:
     units = (amount + 99) // 100  # ceiling division for multiples of 100
     units = min(units, 10)       # cap at 10 units (for 1000 sats or more)
-    return units * 0.2
+    return units * 0.1
 
 @http_retry
 async def fetch_cyberherd_targets():
-    url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
+    url = f'{config["LNBITS_URL"]}/splitpayments/api/v1/targets'
     headers = {
         'accept': 'application/json',
         'X-API-KEY': config['CYBERHERD_KEY']
@@ -426,8 +423,8 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
     try:
         # Initialize predefined wallet with default percentage
         predefined_wallet = {
-            'wallet': PREDEFINED_WALLET_ADDRESS,
-            'alias': PREDEFINED_WALLET_ALIAS,
+            'wallet': config['PREDEFINED_WALLET_ADDRESS'],
+            'alias': config['PREDEFINED_WALLET_ALIAS'],
             'percent': PREDEFINED_WALLET_PERCENT_DEFAULT
         }
         combined_wallets = []
@@ -506,7 +503,7 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
 @http_retry
 async def update_cyberherd_targets(targets):
     try:
-        url = f'{LNBITS_URL}/splitpayments/api/v1/targets'
+        url = f'{config["LNBITS_URL"]}/splitpayments/api/v1/targets'
         headers = {
             'accept': 'application/json',
             'X-API-KEY': config['CYBERHERD_KEY'],
@@ -530,7 +527,7 @@ async def update_cyberherd_targets(targets):
 async def get_balance(force_refresh=False):
     try:
         response = await http_client.get(
-            f'{LNBITS_URL}/api/v1/wallet',
+            f'{config["LNBITS_URL"]}/api/v1/wallet',
             headers={'X-Api-Key': config['HERD_KEY']}
         )
         response.raise_for_status()
@@ -554,7 +551,7 @@ async def get_balance(force_refresh=False):
 async def fetch_btc_price():
     try:
         response = await http_client.get(
-            f'{OPENHAB_URL}/rest/items/BTC_Price_Output/state',
+            f'{config["OPENHAB_URL"]}/rest/items/BTC_Price_Output/state',
             auth=(config['OH_AUTH_1'], '')
         )
         response.raise_for_status()
@@ -574,7 +571,7 @@ async def fetch_btc_price():
 async def convert_to_sats(amount: float):
     try:
         payload = {"from_": "usd", "amount": amount, "to": "sat"}
-        response = await http_client.post(f'{LNBITS_URL}/api/v1/conversion', json=payload)
+        response = await http_client.post(f'{config["LNBITS_URL"]}/api/v1/conversion', json=payload)
         response.raise_for_status()
         sats = response.json()['sats']
         await cache.set(f'usd_to_sats_{amount}', sats, ttl=300)
@@ -592,7 +589,7 @@ async def convert_to_sats(amount: float):
 @http_retry
 async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KEY']):
     try:
-        url = f"{LNBITS_URL}/api/v1/payments"
+        url = f"{config['LNBITS_URL']}/api/v1/payments"
         headers = {
             "X-API-KEY": key,
             "Content-Type": "application/json"
@@ -615,7 +612,7 @@ async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KE
 @http_retry
 async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
     try:
-        url = f"{LNBITS_URL}/api/v1/payments"
+        url = f"{config['LNBITS_URL']}/api/v1/payments"
         headers = {
             "X-API-KEY": key,
             "Content-Type": "application/json"
@@ -633,12 +630,131 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
     except Exception as e:
         logger.error(f"Error paying invoice: {e}")
         raise
+        
+@http_retry
+async def make_lnurl_payment(
+    lud16: str,
+    msat_amount: int,
+    description: str = "LNURL Payment",
+    key: str = config['HERD_KEY']
+) -> Optional[dict]:
+    """
+    Attempt an LNURL payment to `lud16` using LNbits.
+    :param lud16: The LNURL or LN address (e.g. 'alice@getalby.com').
+    :param msat_amount: Amount in *millisatoshis* to send.
+    :param description: The memo or LNURL pay 'comment'.
+    :param key: LNbits wallet key (defaults to 'HERD_KEY' from config).
+    :return: LNbits JSON response dict on success, or None on failure.
+    """
+
+    try:
+        local_headers = {
+            "accept": "application/json",
+            "X-API-KEY": key,
+            "Content-Type": "application/json"
+        }
+
+        # 1) LNURLscan: tell LNbits we want to pay 'lud16' LNURL
+        lnurl_scan_url = f"{config['LNBITS_URL']}/api/v1/lnurlscan/{lud16}"
+        logger.info(f"Scanning LNURL: {lnurl_scan_url}")
+        lnurl_resp = await http_client.get(lnurl_scan_url, headers=local_headers)
+        lnurl_resp.raise_for_status()
+        lnurl_data = lnurl_resp.json()
+
+        # Check if amount is in the LNURL's allowed range
+        if not (lnurl_data["minSendable"] <= msat_amount <= lnurl_data["maxSendable"]):
+            logger.error(
+                f"{lud16}: {msat_amount} msat is out of bounds "
+                f"(min: {lnurl_data['minSendable']}, max: {lnurl_data['maxSendable']})"
+            )
+            return None
+
+        # 2) Build LNURL Payment Payload
+        # LNbits expects 'amount' in msat
+        payment_payload = {
+            "description_hash": lnurl_data["description_hash"],
+            "callback": lnurl_data["callback"],
+            "amount": msat_amount,
+            "memo": description,
+            "description": description
+        }
+
+        # If LNURL pay endpoint allows 'comment', optionally include one
+        comment_allowed = lnurl_data.get("commentAllowed", 0)
+        if comment_allowed > 0:
+            payment_payload["comment"] = description
+
+        # 3) If LNURL supports NIP-57 “Zap” (allowsNostr & nostrPubkey),
+        #    create & sign the zap event
+        if lnurl_data.get("allowsNostr") and lnurl_data.get("nostrPubkey"):
+            # Example import from your nostr_signing module:
+            # from nostr_signing import sign_zap_event
+
+            zapped_pubkey = lnurl_data["nostrPubkey"]
+            zapper_pubkey = "669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6"  # Must match the private key used in sign_zap_event TODO:  add to .env
+
+            # sign_zap_event is a convenience function that builds & signs a kind=9734 event
+            # If you only have sign_event, you'd manually build the event structure with tags,
+            # then sign it. For example:
+            #
+            #   event = build_zap_event(
+            #       msat_amount, zapper_pubkey, zapped_pubkey, content=description
+            #   )
+            #   signed_event = await sign_event(event, config['NOS_SEC'])
+            #
+            # This snippet assumes a sign_zap_event(...) function:
+            signed_event = await sign_zap_event(
+                msat_amount=msat_amount,
+                zapper_pubkey=zapper_pubkey,
+                zapped_pubkey=zapped_pubkey,
+                private_key_hex=config['NOS_SEC'],
+                content=description
+            )
+
+            # Attach the signed event JSON to LNbits payment payload
+            payment_payload["nostr"] = json.dumps(signed_event)
+            logger.info(f"NIP-57 zap event attached for {lud16}")
+
+        # 4) POST to LNbits LNURL pay endpoint
+        payment_url = f"{config['LNBITS_URL']}/api/v1/payments/lnurl"
+        logger.info(f"Sending LNURL payment to {payment_url}")
+        pay_resp = await http_client.post(payment_url, headers=local_headers, json=payment_payload)
+        pay_resp.raise_for_status()
+
+        result = pay_resp.json()
+        logger.info(f"LNURL payment successful: {result}")
+        return result
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"Network request failed: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in make_lnurl_payment: {e}")
+        return None
+        
+async def zap_lud16_endpoint(lud16: str, sats: int = 1, text="CyberHerd Treats."):
+    msat_amount = sats * 1000
+
+    response = await make_lnurl_payment(
+        lud16=lud16,
+        msat_amount=msat_amount,
+        description=text,
+        key=config['HERD_KEY'] 
+    )
+    
+    if response:
+        return {"status": "success", "result": response}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to LNURL pay.")
 
 @http_retry
 async def is_feeder_override_enabled():
     try:
         response = await http_client.get(
-            f'{OPENHAB_URL}/rest/items/FeederOverride/state',
+            f'{config["OPENHAB_URL"]}/rest/items/FeederOverride/state',
             auth=(config['OH_AUTH_1'], '')
         )
         response.raise_for_status()
@@ -657,7 +773,7 @@ async def is_feeder_override_enabled():
 async def trigger_feeder():
     try:
         response = await http_client.post(
-            f'{OPENHAB_URL}/rest/rules/88bd9ec4de/runnow',
+            f'{config["OPENHAB_URL"]}/rest/rules/88bd9ec4de/runnow',
             auth=(config['OH_AUTH_1'], '')
         )
         response.raise_for_status()
@@ -679,16 +795,11 @@ async def trigger_feeder():
     retry=retry_if_exception_type(Exception)
 )
 async def process_payment_data(payment_data):
-    """
-    Updated process_payment_data to preserve amount/difference/spots_remaining usage
-    while still allowing a 'cyber_herd' path for new members and feeder logic.
-    """
     try:
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
 
         wallet_balance = payment_data.get('wallet_balance')
-        logger.info(f"wallet_balance from LNbits event: {wallet_balance}")
         
         async with app_state.lock:
             app_state.balance = math.floor(wallet_balance)
@@ -727,12 +838,12 @@ async def process_payment_data(payment_data):
 
                             # Verify lud16 and nip05
                             is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
-                            is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
+                            #is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
 
-                            if not is_valid_lud16 or not is_valid_nip05:
+                            if not is_valid_lud16:
                                 logger.warning(
                                     f"Record rejected for pubkey {pubkey}: "
-                                    f"Valid lud16={is_valid_lud16}, Valid nip05={is_valid_nip05}"
+                                    f"Valid lud16={is_valid_lud16}"
                                 )
                             else:
                                 nprofile = await generate_nprofile(pubkey)
@@ -754,7 +865,8 @@ async def process_payment_data(payment_data):
                                         payouts=0.0,
                                         amount=amount_sats
                                     )
-
+                                    
+                                    #TODO: remove this part after implementing cyberherd payments.  (It's the splits ext)
                                     logger.info(f"Calling update_cyber_herd() with {new_member_data}")
                                     result = await update_cyber_herd([new_member_data])
                                     if result and result.get("new_members_added", 0) > 0:
@@ -776,8 +888,10 @@ async def process_payment_data(payment_data):
                 if await trigger_feeder():
                     feeder_triggered = True
                     logger.info("Feeder triggered successfully.")
-
+                    
+                    #TODO:  makes cyberherd payments
                     status = await send_payment(app_state.balance)
+
                     if status['success']:
                         # Send a "feeder_triggered" message
                         feeder_msg, _ = await messaging.make_messages(
@@ -791,6 +905,8 @@ async def process_payment_data(payment_data):
             # If feeder not triggered, do the usual "sats_received" fallback if no new members
             if not feeder_triggered and not new_cyberherd_record_created:
                 difference = TRIGGER_AMOUNT_SATS - app_state.balance
+
+                # default payment message (not a zap)
                 if (payment_amount / 1000) >= 10:
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
@@ -1071,19 +1187,28 @@ def calculate_member_updates(
     current_kinds: Set[int],
     new_amount: int
 ) -> Tuple[float, str]:
+    """
+    Recalculate how much to add to 'payouts' based on newly-seen kinds.
+    - For kinds 6 & 7, we add a small bonus only once (the first time).
+    - For kind 9734, we *always* add 'calculate_payout(new_amount)' 
+      so repeated zaps keep raising payouts.
+    """
+    payout_increment = 0.0
 
-    new_special_kinds = [k for k in [9734, 7, 6] if k in kinds_int and k not in current_kinds]
-    payout_increment = 0
+    if 9734 in kinds_int:
+        payout_increment += calculate_payout(float(new_amount))
+
+    new_special_kinds = [k for k in [6, 7] if k in kinds_int and k not in current_kinds]
     for k in new_special_kinds:
-        if k == 9734:
-            payout_increment += calculate_payout(float(new_amount))
-        elif k == 7:
+        if k == 7:
             payout_increment += 0.1
         elif k == 6:
             payout_increment += 0.2
 
+    # Merge new kinds into existing
     updated_kinds_set = current_kinds.union(set(kinds_int))
     updated_kinds_str = ','.join(map(str, sorted(updated_kinds_set)))
+
     return payout_increment, updated_kinds_str
 
 async def update_member_record(
@@ -1250,7 +1375,7 @@ async def reset_cyber_herd():
             'accept': 'application/json',
             'X-API-KEY': config['CYBERHERD_KEY']
         }
-        url = f"{LNBITS_URL}/splitpayments/api/v1/targets"
+        url = f"{config['LNBITS_URL']}/splitpayments/api/v1/targets"
 
         # Delete all existing targets
         response = await http_client.delete(url, headers=headers)
@@ -1259,8 +1384,8 @@ async def reset_cyber_herd():
 
         # Add predefined wallet target with 100% allocation
         predefined_wallet = {
-            'wallet': PREDEFINED_WALLET_ADDRESS,
-            'alias': PREDEFINED_WALLET_ALIAS,
+            'wallet': config['PREDEFINED_WALLET_ADDRESS'],
+            'alias': config['PREDEFINED_WALLET_ALIAS'],
             'percent': PREDEFINED_WALLET_PERCENT_RESET
         }
         new_targets = {"targets": [predefined_wallet]}
