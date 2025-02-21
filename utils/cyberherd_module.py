@@ -98,7 +98,7 @@ def parse_nostr_uri(uri: str) -> Optional[Dict[str, str]]:
         if entity.startswith('npub1'):
             return {'type': 'pubkey', 'data': entity}
         elif entity.startswith('note1'):
-            return {'type': 'note', 'data': entity}
+            return {'type': 'note', 'data':entity}
         elif entity.startswith('nprofile1'):
             return {'type': 'profile', 'data': entity}
     except:
@@ -257,12 +257,49 @@ class Verifier:
 class MetadataFetcher:
     def __init__(self):
         self.subprocess_semaphore = subprocess_semaphore
-        self.default_relays: Set[str] = {
+        # Keep as simple list for nak compatibility
+        self.default_relays = [
             "wss://relay.damus.io",
             "wss://relay.primal.net",
             "wss://nos.lol",
             "wss://relay.nostr.band"
-        }
+        ]
+
+    async def get_relay_list(self, pubkey: str) -> List[str]:
+        """
+        Get relay list using nak command-line format.
+        Returns simple list of URLs as that's what nak expects.
+        """
+        relay_command = [
+            "/usr/local/bin/nak",
+            "req",  # nak uses simple request format
+            "-k", str(NostrKind.RELAY_LIST),  # Use basic kind number
+            "-a", pubkey
+        ]
+        
+        # Add default relays directly as arguments
+        relay_command.extend(self.default_relays)
+        
+        try:
+            result = await self._lookup_metadata_attempt(pubkey, relay_command)
+            if result.returncode != 0:
+                return self.default_relays
+
+            relays = []
+            if result.stdout:
+                event_data = json.loads(result.stdout.decode())
+                # Extract just the URLs from r tags
+                for tag in event_data.get('tags', []):
+                    if len(tag) >= 2 and tag[0] == 'r':
+                        relay_url = tag[1]
+                        if self._validate_relay_url(relay_url):
+                            relays.append(relay_url)
+
+            return relays if relays else self.default_relays
+
+        except Exception as e:
+            logger.error(f"Error fetching relay list: {e}")
+            return self.default_relays
 
     @tenacity.retry(
         wait=tenacity.wait_fixed(1),
@@ -278,67 +315,24 @@ class MetadataFetcher:
         async with self.subprocess_semaphore:
             return await run_subprocess(metadata_command, timeout=15)
 
-    async def get_relay_list(self, pubkey: str) -> Set[str]:
-        """Get relay list per NIP-65"""
-        relay_command = [
-            "/usr/local/bin/nak",
-            "req",
-            "-k",
-            str(NostrKind.RELAY_LIST),
-            "-a",
-            pubkey,
-            *self.default_relays
-        ]
-        
-        try:
-            result = await self._lookup_metadata_attempt(pubkey, relay_command)
-            if result.returncode != 0:
-                return self.default_relays
-
-            relays: Set[str] = set()
-            if result.stdout:
-                events = [json.loads(line) for line in result.stdout.decode().splitlines()]
-                # Get most recent NIP-65 event
-                valid_events = [NostrEvent.from_dict(e) for e in events]
-                if not valid_events:
-                    return self.default_relays
-                    
-                latest_event = max(valid_events, key=lambda x: x.created_at)
-                
-                # Extract relay URLs from 'r' tags
-                for tag in latest_event.tags:
-                    if len(tag) >= 2 and tag[0] == 'r':
-                        relay_url = tag[1]
-                        try:
-                            parsed = urlparse(relay_url)
-                            if parsed.scheme in ['ws', 'wss']:
-                                relays.add(relay_url)
-                        except Exception:
-                            continue
-
-            return relays if relays else self.default_relays
-        except Exception as e:
-            logger.error(f"Error fetching relay list: {e}")
-            return self.default_relays
-
     async def lookup_metadata(self, pubkey: str) -> Optional[Dict[str, Optional[str]]]:
         """Lookup metadata per NIP-01"""
         if not is_valid_pubkey(pubkey):
             return None
 
-        metadata_command = [
-            "/usr/local/bin/nak",
-            "req",
-            "-k",
-            str(NostrKind.METADATA),
-            "-a",
-            pubkey
-        ]
-
         try:
-            # Get user's preferred relays first
-            user_relays = await self.get_relay_list(pubkey)
-            metadata_command.extend(user_relays)
+            # Get user's preferred relays as simple list
+            relays = await self.get_relay_list(pubkey)
+            
+            metadata_command = [
+                "/usr/local/bin/nak",
+                "req",
+                "-k",
+                str(NostrKind.METADATA),
+                "-a",
+                pubkey,
+                *relays  # Pass relays as simple list
+            ]
 
             result = await self._lookup_metadata_attempt(pubkey, metadata_command)
             if result.returncode != 0:
@@ -377,7 +371,6 @@ class MetadataFetcher:
             logger.error(f"Error in metadata lookup: {e}")
             return None
 
-# Encapsulated nprofile Generation
 async def generate_nprofile(pubkey: str) -> Optional[str]:
     """
     Generate an nprofile using the nak command.
@@ -464,6 +457,7 @@ class NostrKind(IntEnum):
     CHANNEL_CREATE = 40
     CHANNEL_MESSAGE = 42
     RELAY_LIST = 10002
+    RELAY_LIST_METADATA = 10002
 
 @dataclass
 class NostrEvent:
