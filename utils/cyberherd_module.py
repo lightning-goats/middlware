@@ -2,18 +2,18 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, List, Tuple
 import httpx
 import subprocess
+
 from subprocess import TimeoutExpired, CompletedProcess
-import tenacity
-import dns.resolver
-import dns.exception
-from urllib.parse import urlparse, urljoin
-import idna
-from binascii import unhexlify
-from dataclasses import dataclass
-from enum import IntEnum
+
+# Default relays to use when none are provided
+DEFAULT_RELAYS = [
+    "wss://relay.primal.net/",
+    "wss://relay.damus.io/",
+    'wss://nostr.oxtr.dev'
+]
 
 # Logging Configuration
 logger = logging.getLogger(__name__)
@@ -39,174 +39,47 @@ async def run_subprocess(command: list, timeout: int = 30) -> CompletedProcess:
         await proc.communicate()
         raise TimeoutExpired(cmd=command, timeout=timeout)
 
-# Add validation utilities
-def is_valid_pubkey(pubkey: str) -> bool:
-    """Validate hex pubkey format per NIP-01."""
-    if not isinstance(pubkey, str):
-        return False
-    
-    # Strip npub prefix if present (NIP-19)
-    if pubkey.startswith('npub'):
-        # In production, you'd decode the bech32 here
-        return False
-        
-    try:
-        # Must be 64 characters of hex
-        if len(pubkey) != 64:
-            return False
-        unhexlify(pubkey)
-        return True
-    except:
-        return False
-
-def is_valid_metadata_content(content: Dict) -> bool:
-    """Validate metadata content format per NIP-01."""
-    if not isinstance(content, dict):
-        return False
-
-    # Required fields must be strings if present
-    string_fields = ['name', 'display_name', 'about', 'picture', 'banner', 
-                    'nip05', 'lud06', 'lud16']
-    
-    for field in string_fields:
-        if field in content and not isinstance(content[field], str):
-            return False
-            
-    # Website must be valid URL if present
-    if 'website' in content:
-        try:
-            parsed = urlparse(content['website'])
-            if not all([parsed.scheme, parsed.netloc]):
-                return False
-        except:
-            return False
-            
-    return True
-
-def parse_nostr_uri(uri: str) -> Optional[Dict[str, str]]:
-    """Parse nostr: URI scheme per NIP-21."""
-    if not uri.startswith('nostr:'):
-        return None
-    
-    try:
-        parsed = urlparse(uri)
-        if parsed.scheme != 'nostr':
-            return None
-            
-        # Handle different entity types
-        entity = parsed.path
-        if entity.startswith('npub1'):
-            return {'type': 'pubkey', 'data': entity}
-        elif entity.startswith('note1'):
-            return {'type': 'note', 'data':entity}
-        elif entity.startswith('nprofile1'):
-            return {'type': 'profile', 'data': entity}
-    except:
-        return None
-    
-    return None
-
-async def resolve_domain(domain: str) -> bool:
-    """
-    Resolve domain using dnspython.
-    Returns True if domain resolves successfully.
-    """
-    try:
-        resolver = dns.resolver.Resolver()
-        # Try both A and AAAA records
-        try:
-            resolver.resolve(domain, 'A')
-            return True
-        except dns.resolver.NoAnswer:
-            try:
-                resolver.resolve(domain, 'AAAA')
-                return True
-            except dns.resolver.NoAnswer:
-                return False
-    except (dns.resolver.NXDOMAIN, dns.resolver.NoNameservers, 
-            dns.exception.DNSException) as e:
-        logger.error(f"DNS resolution failed for {domain}: {e}")
-        return False
-
 # Verifier Class
 class Verifier:
     @staticmethod
     async def verify_nip05(nip05: str, expected_pubkey: str) -> bool:
         """
         Verify a NIP-05 identifier using the _well-known/nostr.json file.
-        Includes DNS resolution and proper URL handling.
         """
-        if not nip05 or not expected_pubkey:
-            logger.error("Missing NIP-05 identifier or pubkey")
+        if not nip05:
+            logger.error("No NIP-05 identifier provided.")
             return False
+
+        if '@' not in nip05:
+            logger.error(f"Invalid NIP-05 identifier format: {nip05}")
+            return False
+
+        username, domain = nip05.split('@', 1)
+        url = f"https://{domain}/.well-known/nostr.json?name={username}"
+        logger.debug(f"Fetching NIP-05 verification file from: {url}")
 
         try:
-            # Parse and normalize the NIP-05 identifier
-            nip05 = nip05.lower().strip()
-            if '@' not in nip05:
-                logger.error(f"Invalid NIP-05 identifier format: {nip05}")
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+            pubkeys = data.get("names", {}).get(username)
+            if pubkeys and pubkeys == expected_pubkey:
+                logger.info(f"NIP-05 verification succeeded for {nip05} -> {expected_pubkey}")
+                return True
+            else:
+                logger.error(f"NIP-05 verification failed: {nip05} does not match {expected_pubkey}")
                 return False
 
-            username, domain = nip05.split('@', 1)
-            
-            # Handle IDN domains
-            try:
-                ascii_domain = idna.encode(domain).decode('ascii')
-            except Exception as e:
-                logger.error(f"Invalid domain name encoding: {e}")
-                return False
-
-            # Verify domain resolves using dnspython
-            if not await resolve_domain(ascii_domain):
-                logger.error(f"Domain {ascii_domain} does not resolve")
-                return False
-
-            # Build and validate URL
-            for scheme in ['https', 'http']:
-                base_url = f"{scheme}://{ascii_domain}"
-                try:
-                    parsed = urlparse(base_url)
-                    if not all([parsed.scheme, parsed.netloc]):
-                        continue
-                    
-                    url = urljoin(base_url, '/.well-known/nostr.json')
-                    params = {'name': username}
-
-                    async with httpx.AsyncClient(follow_redirects=True) as client:
-                        response = await client.get(url, params=params, timeout=10)
-                        response.raise_for_status()
-                        
-                        try:
-                            data = response.json()
-                        except json.JSONDecodeError:
-                            logger.error("Invalid JSON response from NIP-05 endpoint")
-                            continue
-
-                        names = data.get("names", {})
-                        if not isinstance(names, dict):
-                            logger.error("Invalid 'names' field in NIP-05 response")
-                            continue
-
-                        pubkey = names.get(username)
-                        if not pubkey:
-                            logger.error(f"Username {username} not found in NIP-05 response")
-                            continue
-
-                        if pubkey == expected_pubkey:
-                            logger.info(f"NIP-05 verification succeeded for {nip05}")
-                            return True
-                        else:
-                            logger.error(f"Pubkey mismatch: expected {expected_pubkey}, got {pubkey}")
-
-                except httpx.RequestError as e:
-                    logger.error(f"HTTP request failed: {e}")
-                    continue
-
-            return False
-
+        except httpx.RequestError as e:
+            logger.error(f"Failed to verify NIP-05 identifier: {e}")
+        except json.JSONDecodeError:
+            logger.error("Invalid JSON response from NIP-05 endpoint.")
         except Exception as e:
             logger.error(f"Unexpected error during NIP-05 verification: {e}")
-            return False
+
+        return False
 
     @staticmethod
     async def verify_lud16(lud16: str) -> bool:
@@ -253,138 +126,125 @@ class Verifier:
 
         return False
 
-# Updated MetadataFetcher Class
+# MetadataFetcher Class
+def get_best_relays(relays: Optional[List[str]] = None) -> List[str]:
+    """Get the best 3 relays from provided list or defaults."""
+    if relays and len(relays) > 0:
+        # Take up to first 3 user relays
+        return relays[:3]
+    return DEFAULT_RELAYS
+
 class MetadataFetcher:
     def __init__(self):
         self.subprocess_semaphore = subprocess_semaphore
-        # Keep as simple list for nak compatibility
-        self.default_relays = [
-            "wss://relay.damus.io",
-            "wss://relay.primal.net",
-            "wss://nos.lol",
-            "wss://relay.nostr.band"
-        ]
 
-    async def get_relay_list(self, pubkey: str) -> List[str]:
+    async def lookup_metadata(self, pubkey: str, relays: Optional[List[str]] = None) -> Optional[Dict[str, Optional[str]]]:
         """
-        Get relay list using nak command-line format.
-        Returns simple list of URLs as that's what nak expects.
+        Asynchronously look up metadata for a given pubkey.
+        
+        Args:
+            pubkey: The public key to look up
+            relays: Optional list of relay URLs to use. Falls back to defaults if None.
         """
-        relay_command = [
+        selected_relays = get_best_relays(relays)
+        logger.debug(f"Looking up metadata for pubkey: {pubkey} using relays: {selected_relays}")
+        metadata_command = [
             "/usr/local/bin/nak",
-            "req",  # nak uses simple request format
-            "-k", str(NostrKind.RELAY_LIST),  # Use basic kind number
-            "-a", pubkey
+            "req",
+            "-k",
+            "0",  # Explicitly fetch kind: 0 (metadata events)
+            "-a",
+            pubkey
         ]
-        
-        # Add default relays directly as arguments
-        relay_command.extend(self.default_relays)
-        
-        try:
-            result = await self._lookup_metadata_attempt(pubkey, relay_command)
-            if result.returncode != 0:
-                return self.default_relays
+        metadata_command.extend(selected_relays)
 
-            relays = []
-            if result.stdout:
-                event_data = json.loads(result.stdout.decode())
-                # Extract just the URLs from r tags
-                for tag in event_data.get('tags', []):
-                    if len(tag) >= 2 and tag[0] == 'r':
-                        relay_url = tag[1]
-                        if self._validate_relay_url(relay_url):
-                            relays.append(relay_url)
+        logger.debug(f"Executing command: {' '.join(metadata_command)}")
 
-            return relays if relays else self.default_relays
-
-        except Exception as e:
-            logger.error(f"Error fetching relay list: {e}")
-            return self.default_relays
-
-    @tenacity.retry(
-        wait=tenacity.wait_fixed(1),
-        stop=tenacity.stop_after_attempt(3),
-        retry=tenacity.retry_if_exception_type(TimeoutExpired),
-        reraise=True
-    )
-    async def _lookup_metadata_attempt(self, pubkey: str, metadata_command: list) -> CompletedProcess:
-        """
-        A helper method that performs a single attempt at fetching metadata.
-        This method will be retried by tenacity if a TimeoutExpired exception is raised.
-        """
         async with self.subprocess_semaphore:
-            return await run_subprocess(metadata_command, timeout=15)
-
-    async def lookup_metadata(self, pubkey: str) -> Optional[Dict[str, Optional[str]]]:
-        """Lookup metadata per NIP-01"""
-        if not is_valid_pubkey(pubkey):
-            return None
-
-        try:
-            # Get user's preferred relays as simple list
-            relays = await self.get_relay_list(pubkey)
-            
-            metadata_command = [
-                "/usr/local/bin/nak",
-                "req",
-                "-k",
-                str(NostrKind.METADATA),
-                "-a",
-                pubkey,
-                *relays  # Pass relays as simple list
-            ]
-
-            result = await self._lookup_metadata_attempt(pubkey, metadata_command)
-            if result.returncode != 0:
-                return None
-
-            events = []
-            for line in result.stdout.decode().splitlines():
-                try:
-                    event_dict = json.loads(line)
-                    if event := NostrEvent.from_dict(event_dict):
-                        if event.kind == NostrKind.METADATA:
-                            events.append(event)
-                except Exception:
-                    continue
-
-            if not events:
-                return None
-
-            # Get most recent valid metadata
-            latest_event = max(events, key=lambda x: x.created_at)
             try:
-                content = json.loads(latest_event.content)
-                if not is_valid_metadata_content(content):
+                result = await run_subprocess(metadata_command, timeout=15)
+                if result.returncode != 0:
+                    logger.error(f"Error fetching metadata: {result.stderr.decode().strip()}")
                     return None
-                    
-                return {
-                    'nip05': content.get('nip05'),
-                    'lud16': content.get('lud16'),
-                    'display_name': content.get('display_name') or content.get('name', 'Anon'),
-                    'picture': content.get('picture')
-                }
-            except json.JSONDecodeError:
-                return None
 
-        except Exception as e:
-            logger.error(f"Error in metadata lookup: {e}")
+                most_recent_metadata = None
+
+                for meta_line in result.stdout.decode().splitlines():
+                    try:
+                        meta_data = json.loads(meta_line)
+                        if meta_data.get("kind") == 0:  # Ensure it's a metadata event
+                            content = json.loads(meta_data.get("content", '{}'))
+                            created_at = meta_data.get('created_at', 0)
+                            
+                            if content.get('lud16'):
+                                if (most_recent_metadata is None or created_at > most_recent_metadata['created_at']):
+                                    most_recent_metadata = {
+                                        'content': content,
+                                        'created_at': created_at
+                                    }
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing metadata line: {e}")
+
+                if most_recent_metadata:
+                    content = most_recent_metadata['content']
+                    return {
+                        'nip05': content.get('nip05', None),
+                        'lud16': content.get('lud16', None),
+                        'display_name': content.get('display_name', content.get('name', 'Anon')),
+                        'picture': content.get('picture', None)  # Add picture field
+                    }
+                else:
+                    logger.warning(f"No valid metadata found for pubkey: {pubkey}")
+
+            except TimeoutExpired:
+                logger.error("Timeout while fetching metadata.")
+            except Exception as e:
+                logger.error(f"Unexpected error during metadata lookup: {e}")
+
             return None
 
+    async def lookup_metadata_with_stored_relays(self, pubkey: str, stored_relays: Optional[List[str]] = None) -> Optional[Dict[str, Optional[str]]]:
+        """
+        Look up metadata using stored relays first, then fall back to user's 10002, then DEFAULT_RELAYS
+        """
+        # Try stored relays first if available
+        if stored_relays:
+            metadata = await self.lookup_metadata(pubkey, stored_relays)
+            if metadata:
+                return metadata
+
+        # Try user's relay list from 10002
+        user_relays = await lookup_relay_list(pubkey)
+        if user_relays:
+            metadata = await self.lookup_metadata(pubkey, user_relays)
+            if metadata:
+                return metadata
+
+        # Fall back to DEFAULT_RELAYS
+        return await self.lookup_metadata(pubkey, DEFAULT_RELAYS)
+
+    async def lookup_metadata_with_relays(self, pubkey: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+        """
+        Lookup both metadata and relays for a user, trying their preferred relays first.
+        Returns (metadata, relays) tuple.
+        """
+        # First get their relay list
+        relays = await lookup_relay_list(pubkey)
+        
+        # Then try to get metadata using those relays
+        metadata = await self.lookup_metadata(pubkey, relays)
+        if metadata:
+            return metadata, relays
+            
+        # If that failed, try with default relays
+        metadata = await self.lookup_metadata(pubkey, DEFAULT_RELAYS)
+        return metadata, DEFAULT_RELAYS if metadata else []
+
+# Encapsulated nprofile Generation
 async def generate_nprofile(pubkey: str) -> Optional[str]:
     """
     Generate an nprofile using the nak command.
-    
-    Args:
-        pubkey: The public key to encode
-        
-    Returns:
-        Optional[str]: The nprofile string or None if generation fails
     """
-    if not is_valid_pubkey(pubkey):
-        logger.error(f"Invalid pubkey format: {pubkey}")
-        return None
-
     nprofile_command = ['/usr/local/bin/nak', 'encode', 'nprofile', pubkey]
     async with subprocess_semaphore:
         try:
@@ -392,112 +252,127 @@ async def generate_nprofile(pubkey: str) -> Optional[str]:
             if result.returncode != 0:
                 logger.error(f"Error generating nprofile: {result.stderr.decode().strip()}")
                 return None
-            
-            nprofile = result.stdout.decode().strip()
-            if not nprofile.startswith('nprofile'):
-                logger.error(f"Invalid nprofile format generated: {nprofile}")
-                return None
-                
-            return nprofile
+            return result.stdout.decode().strip()
         except asyncio.TimeoutError as e:
             logger.error(f"Timeout generating nprofile for pubkey {pubkey}: {e}")
         except Exception as e:
             logger.error(f"Unexpected error generating nprofile: {e}")
         return None
 
-async def check_cyberherd_tag(event_id: str, relay_url: str = "wss://relay.primal.net") -> bool:
+async def check_cyberherd_tag(event_id: str, relays: Optional[List[str]] = None) -> bool:
     """
-    Check if an event has a 'CyberHerd' tag.
-    
+    Check if the event identified by `event_id` has a 'CyberHerd' tag.
+
     Args:
-        event_id: The event ID to check
-        relay_url: The relay URL to query (default: wss://relay.primal.net)
-        
+        event_id (str): The ID of the event to check.
+        relays (Optional[List[str]]): List of relay URLs. Defaults to DEFAULT_RELAYS.
+
     Returns:
-        bool: True if the event has a CyberHerd tag, False otherwise
+        bool: True if the event has a 'CyberHerd' tag, False otherwise.
     """
-    if not event_id or not isinstance(event_id, str):
-        logger.error("Invalid event_id provided")
+    selected_relays = get_best_relays(relays)
+    nak_command = ["nak", "req", "-i", event_id, *selected_relays]
+    
+    try:
+        result = subprocess.run(nak_command, capture_output=True, text=True, check=True)
+        event_data = json.loads(result.stdout)
+        logger.debug(f"nak command output: {event_data}")
+
+        # Ensure the `tags` field exists and is a list of lists
+        tags = event_data.get("tags", [])
+        if isinstance(tags, list) and all(isinstance(tag, list) and len(tag) >= 2 for tag in tags):
+            # Check if any tag has "t" as the first element and "CyberHerd" (case insensitive) as the second
+            for tag in tags:
+                if tag[0] == "t" and tag[1].lower() == "cyberherd":
+                    return True
+
+        # Log unexpected format or absence of the tag
+        logger.info(f"No 'CyberHerd' tag found for event_id: {event_id}")
         return False
 
-    nak_command = ["/usr/local/bin/nak", "req", "-i", event_id, relay_url]
-    try:
-        result = await run_subprocess(nak_command, timeout=15)
-        if result.returncode != 0:
-            logger.error(f"nak command failed: {result.stderr.decode()}")
-            return False
-
-        event_data = json.loads(result.stdout)
-        tags = event_data.get("tags", [])
-        
-        return any(
-            len(tag) >= 2 and tag[0] == "t" and tag[1].lower() == "cyberherd"
-            for tag in tags
-            if isinstance(tag, list)
-        )
-
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running nak command: {e.stderr}")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON output from nak command: {e}")
     except Exception as e:
-        logger.error(f"Error checking CyberHerd tag: {e}")
-    
+        logger.error(f"Unexpected error while checking CyberHerd tag: {e}")
+
     return False
 
-class NostrKind(IntEnum):
-    """NIP-01 and other NIPs event kinds"""
-    METADATA = 0
-    TEXT_NOTE = 1
-    RECOMMEND_RELAY = 2
-    CONTACTS = 3
-    ENCRYPTED_DM = 4
-    DELETE = 5
-    REPOST = 6
-    REACTION = 7
-    BADGE_AWARD = 8
-    CHANNEL_CREATE = 40
-    CHANNEL_MESSAGE = 42
-    RELAY_LIST = 10002
-    RELAY_LIST_METADATA = 10002
-
-@dataclass
-class NostrEvent:
-    """NIP-01 compliant event structure"""
-    id: str
-    pubkey: str
-    created_at: int
-    kind: int
-    tags: List[List[str]]
-    content: str
-    sig: str
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Optional['NostrEvent']:
-        """Create NostrEvent from dict, validating required fields"""
-        try:
-            required_fields = ['id', 'pubkey', 'created_at', 'kind', 'tags', 'content', 'sig']
-            if not all(field in data for field in required_fields):
-                return None
+def extract_relays_from_10002_tags(tags: list) -> list:
+    """Extract relay URLs specifically from Kind 10002 event tags."""
+    relays = []
+    if not tags:
+        return relays
+        
+    # For Kind 10002, each relay is in a tag starting with 'r'
+    # Format: ["r", "wss://relay.example.com"]
+    for tag in tags:
+        if not tag or len(tag) < 2:
+            continue
             
-            # Validate types
-            if not isinstance(data['created_at'], int):
-                return None
-            if not isinstance(data['kind'], int):
-                return None
-            if not isinstance(data['tags'], list):
-                return None
-                
-            return cls(**{k: data[k] for k in required_fields})
-        except Exception:
-            return None
+        if tag[0] == 'r':  # Kind 10002 uses 'r' tags for relays
+            relay_url = tag[1]
+            if isinstance(relay_url, str) and relay_url.startswith(('ws://', 'wss://')):
+                relays.append(relay_url)
+            
+    return relays  # Return raw relay URLs without sanitizing
 
-async def decode_nprofile(nprofile: str) -> Optional[str]:
-    """Decode NIP-19 nprofile to get pubkey"""
+async def lookup_relay_list(pubkey: str, relays: Optional[List[str]] = None) -> List[str]:
+    """
+    Look up Kind 10002 (Relay List Metadata) events for a given pubkey and extract relay URLs.
+    Falls back to cached results if available.
+    """
+    if not pubkey:
+        return DEFAULT_RELAYS
+
+    selected_relays = get_best_relays(relays)
+    logger.debug(f"Looking up kind 10002 for pubkey {pubkey} using relays: {selected_relays}")
+
     try:
-        decode_command = ['/usr/local/bin/nak', 'decode', nprofile]
-        result = await run_subprocess(decode_command, timeout=5)
+        # First try the nak command for kind 10002
+        result = await run_subprocess([
+            "/usr/local/bin/nak",
+            "req",
+            "-k",
+            "10002",
+            "-a",
+            pubkey,
+            *selected_relays
+        ], timeout=10)
+
         if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout)
-        return data.get('pubkey')
-    except Exception:
-        return None
+            logger.warning(f"Failed to fetch relay list for {pubkey}, falling back to defaults")
+            return DEFAULT_RELAYS.copy()
+
+        most_recent = None
+        most_recent_time = 0
+
+        for line in result.stdout.decode().splitlines():
+            try:
+                event = json.loads(line)
+                if (event.get('kind') == 10002 and 
+                    event.get('pubkey') == pubkey and 
+                    event.get('created_at', 0) > most_recent_time):
+                    most_recent = event
+                    most_recent_time = event['created_at']
+            except json.JSONDecodeError:
+                continue
+
+        if most_recent:
+            user_relays = []
+            for tag in most_recent.get('tags', []):
+                if len(tag) >= 2 and tag[0] == 'r':
+                    relay_url = tag[1]
+                    if isinstance(relay_url, str) and relay_url.startswith(('wss://', 'ws://')):
+                        user_relays.append(relay_url)
+            
+            if user_relays:
+                logger.info(f"Found {len(user_relays)} relays for {pubkey}")
+                return user_relays
+
+    except Exception as e:
+        logger.error(f"Error looking up relays for {pubkey}: {e}")
+
+    logger.debug(f"No valid relays found for {pubkey}, using defaults")
+    return DEFAULT_RELAYS
