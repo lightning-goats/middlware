@@ -43,8 +43,13 @@ from utils.nostr_signing import sign_event, sign_zap_event
 # Configuration and Constants
 MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
 PREDEFINED_WALLET_PERCENT_RESET = 100
-PREDEFINED_WALLET_PERCENT_DEFAULT = 80
 TRIGGER_AMOUNT_SATS = 1000
+
+# Add relay configuration
+RELAYS = [
+    "wss://relay.primal.net/",
+    "wss://relay.damus.io/"
+]
 
 def load_env_vars(required_vars):
     load_dotenv()
@@ -99,6 +104,8 @@ class CyberHerdData(BaseModel):
     notified: Optional[str] = None
     payouts: float = 0.0
     amount: Optional[int] = 0
+    picture: Optional[str] = None
+    relays: Optional[List[str]] = RELAYS[:2]  # Default to first two relays from configuration
 
     class Config:
         extra = 'ignore'
@@ -112,6 +119,9 @@ class CyberHerdData(BaseModel):
 class CyberHerdTreats(BaseModel):
     pubkey: str
     amount: int
+
+class SetGoatSatsData(BaseModel):
+    new_amount: int
 
 class PaymentRequest(BaseModel):
     balance: int
@@ -283,13 +293,6 @@ async def startup():
     if not connected:
         logger.warning("Initial WebSocket connection attempt timed out")
 
-    try:
-        response = await get_balance_route(force_refresh=True)
-        app_state.balance = response.get("balance", 0)
-    except Exception as e:
-        logger.error(f"Failed to retrieve balance in startup_event: {e}. Defaulting to 0.")
-        app_state.balance = 0
-
     # Connect to database and create tables
     await database.connect()
     await database.execute('''
@@ -303,7 +306,9 @@ async def startup():
             lud16 TEXT,
             notified TEXT,
             payouts REAL,
-            amount INTEGER
+            amount INTEGER,
+            picture TEXT,
+            relays Text
         )
     ''')
     await database.execute('''
@@ -314,13 +319,21 @@ async def startup():
         )
     ''')
 
-    # Start cache cleanup task
+    try:
+        # Initialize balance
+        response = await get_balance_route(force_refresh=True)
+        app_state.balance = response.get("balance", 0)
+        
+        # Initialize goat_sats_state cache
+        await get_goat_sats_sum_today()
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize states: {e}. Defaulting to 0.")
+        app_state.balance = 0
+
+    # Start background tasks
     asyncio.create_task(cleanup_cache())
-
-    # Start daily reset task
     asyncio.create_task(schedule_daily_reset())
-
-    # Start periodic informational message task
     asyncio.create_task(periodic_informational_messages())
 
 async def schedule_daily_reset():
@@ -398,14 +411,14 @@ async def periodic_informational_messages():
     while True:
         await asyncio.sleep(60)
         if random.random() < 0.4:  # 40% chance
-            # Use the messaging.make_messages to generate the "interface_info" message
             message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info")
             await send_messages_to_clients(message)
 
 def calculate_payout(amount: float) -> float:
-    units = (amount + 99) // 100  # ceiling division for multiples of 100
-    units = min(units, 10)       # cap at 10 units (for 1000 sats or more)
-    return units * 0.1
+    units = (amount + 9) // 10  # Ceiling division for multiples of 10
+    payout = units * 0.01  # Each 10 sats = 0.01 payout
+    payout = max(0.3, min(payout, 1.0))
+    return payout
 
 @http_retry
 async def fetch_cyberherd_targets():
@@ -421,28 +434,34 @@ async def fetch_cyberherd_targets():
 @http_retry
 async def create_cyberherd_targets(new_targets_data, initial_targets):
     try:
-        # Initialize predefined wallet with default percentage
+        non_predefined = [
+            item for item in new_targets_data 
+            if item['wallet'] != config['PREDEFINED_WALLET_ADDRESS']
+        ]
+        
+        # Always set predefined wallet to 90%
         predefined_wallet = {
             'wallet': config['PREDEFINED_WALLET_ADDRESS'],
             'alias': config['PREDEFINED_WALLET_ALIAS'],
-            'percent': PREDEFINED_WALLET_PERCENT_DEFAULT
+            'percent': 90  # Fixed at 90%
         }
-        combined_wallets = []
+        
+        # Remaining 10% to split between other wallets
+        max_allocation = 10  # The remaining percentage for other wallets
 
-        # Collect non-predefined wallets
+        combined_wallets = []
         for item in new_targets_data:
             wallet = item['wallet']
             name = item.get('alias', 'Unknown')
             payouts = item.get('payouts', 1.0)
-            if wallet != predefined_wallet['wallet']:
+            if wallet != config['PREDEFINED_WALLET_ADDRESS']:
                 combined_wallets.append({'wallet': wallet, 'alias': name, 'payouts': payouts})
 
         total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
-        max_allocation = 100 - PREDEFINED_WALLET_PERCENT_DEFAULT
-        min_percent_per_wallet = 2
+        min_percent_per_wallet = 1
         max_wallets_allowed = floor(max_allocation / min_percent_per_wallet)
 
-        # Cap the number of wallets so each can get at least 2%
+        # Limit number of wallets if necessary
         if len(combined_wallets) > max_wallets_allowed:
             combined_wallets = sorted(
                 combined_wallets,
@@ -451,55 +470,36 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
             )[:max_wallets_allowed]
             total_payouts = sum(w['payouts'] for w in combined_wallets) or 1
 
-        # Assign baseline minimum (2%) to each wallet
+        # Initial minimum allocation
         for wallet in combined_wallets:
             wallet['percent'] = min_percent_per_wallet
         allocated = min_percent_per_wallet * len(combined_wallets)
         remaining_allocation = max_allocation - allocated
 
         # Distribute remaining allocation proportionally
-        additional_allocations = []
-        for wallet in combined_wallets:
-            prop = wallet['payouts'] / total_payouts
-            additional = prop * remaining_allocation
-            additional_allocations.append((wallet, additional))
+        if remaining_allocation > 0 and combined_wallets:
+            for wallet in combined_wallets:
+                prop = wallet['payouts'] / total_payouts
+                additional = floor(prop * remaining_allocation)
+                wallet['percent'] += additional
 
-        # Assign floor of proportional allocation
-        for wallet, additional in additional_allocations:
-            add_percent = floor(additional)
-            wallet['percent'] += add_percent
-
-        allocated_percent = sum(w['percent'] for w in combined_wallets)
-        leftover = max_allocation - allocated_percent
-
-        # Distribute leftover percentages one by one
-        if leftover > 0:
-            remainders = []
-            for wallet, additional in additional_allocations:
-                fractional_part = additional - math.floor(additional)
-                remainders.append((fractional_part, wallet))
-
-            # Sort descending by fractional_part
-            remainders.sort(reverse=True, key=lambda x: x[0])
-
-            num_wallets = len(remainders)
-            if num_wallets > 0:
-                # Round-robin distribution of leftover
+            # Handle any leftover percent due to rounding
+            current_total = sum(w['percent'] for w in combined_wallets)
+            leftover = max_allocation - current_total
+            
+            if leftover > 0:
+                # Sort by payouts and give extra percents to top contributors
+                sorted_wallets = sorted(combined_wallets, key=lambda x: x['payouts'], reverse=True)
                 for i in range(int(leftover)):
-                    index = i % num_wallets
-                    remainders[index][1]['percent'] += 1
+                    sorted_wallets[i % len(sorted_wallets)]['percent'] += 1
 
-
-        targets_list = combined_wallets
-        predefined_wallet['percent'] = 100 - sum(w['percent'] for w in targets_list)
-        targets_list.insert(0, predefined_wallet)
-
+        targets_list = [predefined_wallet] + combined_wallets
         return {"targets": targets_list}
 
     except Exception as e:
         logger.error(f"Error creating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-        
+
 @http_retry
 async def update_cyberherd_targets(targets):
     try:
@@ -532,7 +532,6 @@ async def get_balance(force_refresh=False):
         )
         response.raise_for_status()
         balance = response.json()['balance']
-        
         async with app_state.lock:
             app_state.balance = math.floor(balance / 1000)
         return balance
@@ -570,20 +569,15 @@ async def fetch_btc_price():
 @http_retry
 async def convert_to_sats(amount: float):
     try:
-        payload = {"from_": "usd", "amount": amount, "to": "sat"}
-        response = await http_client.post(f'{config["LNBITS_URL"]}/api/v1/conversion', json=payload)
-        response.raise_for_status()
-        sats = response.json()['sats']
-        await cache.set(f'usd_to_sats_{amount}', sats, ttl=300)
+        # Get the current BTC price in USD (cached at the endpoint)
+        btc_price = await fetch_btc_price()
+
+        # Calculate the number of satoshis:
+        # 1 BTC = 100,000,000 sats, so:
+        sats = int(round((amount / btc_price) * 100_000_000))
         return sats
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error converting amount: {e}")
-        raise HTTPException(
-            status_code=response.status_code if e.response else 500,
-            detail="Failed to convert amount"
-        )
     except Exception as e:
-        logger.error(f"Error converting amount: {e}")
+        logger.error(f"Error converting amount {amount} USD to sats: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @http_retry
@@ -635,33 +629,24 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
 async def make_lnurl_payment(
     lud16: str,
     msat_amount: int,
-    description: str = "LNURL Payment",
+    description: str = "",
     key: str = config['HERD_KEY']
 ) -> Optional[dict]:
-    """
-    Attempt an LNURL payment to `lud16` using LNbits.
-    :param lud16: The LNURL or LN address (e.g. 'alice@getalby.com').
-    :param msat_amount: Amount in *millisatoshis* to send.
-    :param description: The memo or LNURL pay 'comment'.
-    :param key: LNbits wallet key (defaults to 'HERD_KEY' from config).
-    :return: LNbits JSON response dict on success, or None on failure.
-    """
-
     try:
         local_headers = {
             "accept": "application/json",
             "X-API-KEY": key,
             "Content-Type": "application/json"
         }
-
-        # 1) LNURLscan: tell LNbits we want to pay 'lud16' LNURL
+        
+        # First get the LNURL-pay parameters
         lnurl_scan_url = f"{config['LNBITS_URL']}/api/v1/lnurlscan/{lud16}"
         logger.info(f"Scanning LNURL: {lnurl_scan_url}")
         lnurl_resp = await http_client.get(lnurl_scan_url, headers=local_headers)
         lnurl_resp.raise_for_status()
         lnurl_data = lnurl_resp.json()
 
-        # Check if amount is in the LNURL's allowed range
+        # Verify amount is within allowed range
         if not (lnurl_data["minSendable"] <= msat_amount <= lnurl_data["maxSendable"]):
             logger.error(
                 f"{lud16}: {msat_amount} msat is out of bounds "
@@ -669,40 +654,23 @@ async def make_lnurl_payment(
             )
             return None
 
-        # 2) Build LNURL Payment Payload
-        # LNbits expects 'amount' in msat
+        # Prepare payment payload
         payment_payload = {
-            "description_hash": lnurl_data["description_hash"],
             "callback": lnurl_data["callback"],
             "amount": msat_amount,
-            "memo": description,
+            "description_hash": lnurl_data["description_hash"],
             "description": description
         }
 
-        # If LNURL pay endpoint allows 'comment', optionally include one
-        comment_allowed = lnurl_data.get("commentAllowed", 0)
-        if comment_allowed > 0:
+        # Add comment if allowed
+        if lnurl_data.get("commentAllowed", 0) > 0:
             payment_payload["comment"] = description
 
-        # 3) If LNURL supports NIP-57 “Zap” (allowsNostr & nostrPubkey),
-        #    create & sign the zap event
+        # Add Nostr zap data if supported
         if lnurl_data.get("allowsNostr") and lnurl_data.get("nostrPubkey"):
-            # Example import from your nostr_signing module:
-            # from nostr_signing import sign_zap_event
-
             zapped_pubkey = lnurl_data["nostrPubkey"]
-            zapper_pubkey = "669ebbcccf409ee0467a33660ae88fd17e5379e646e41d7c236ff4963f3c36b6"  # Must match the private key used in sign_zap_event TODO:  add to .env
-
-            # sign_zap_event is a convenience function that builds & signs a kind=9734 event
-            # If you only have sign_event, you'd manually build the event structure with tags,
-            # then sign it. For example:
-            #
-            #   event = build_zap_event(
-            #       msat_amount, zapper_pubkey, zapped_pubkey, content=description
-            #   )
-            #   signed_event = await sign_event(event, config['NOS_SEC'])
-            #
-            # This snippet assumes a sign_zap_event(...) function:
+            zapper_pubkey = config['HEX_KEY']  # Our public key
+            
             signed_event = await sign_zap_event(
                 msat_amount=msat_amount,
                 zapper_pubkey=zapper_pubkey,
@@ -710,12 +678,11 @@ async def make_lnurl_payment(
                 private_key_hex=config['NOS_SEC'],
                 content=description
             )
-
-            # Attach the signed event JSON to LNbits payment payload
+            
             payment_payload["nostr"] = json.dumps(signed_event)
-            logger.info(f"NIP-57 zap event attached for {lud16}")
+            logger.info(f"Added NIP-57 zap request for {lud16}")
 
-        # 4) POST to LNbits LNURL pay endpoint
+        # Send the payment
         payment_url = f"{config['LNBITS_URL']}/api/v1/payments/lnurl"
         logger.info(f"Sending LNURL payment to {payment_url}")
         pay_resp = await http_client.post(payment_url, headers=local_headers, json=payment_payload)
@@ -728,16 +695,12 @@ async def make_lnurl_payment(
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
         return None
-    except httpx.RequestError as e:
-        logger.error(f"Network request failed: {e}")
-        return None
     except Exception as e:
         logger.error(f"Unexpected error in make_lnurl_payment: {e}")
         return None
         
 async def zap_lud16_endpoint(lud16: str, sats: int = 1, text="CyberHerd Treats."):
     msat_amount = sats * 1000
-
     response = await make_lnurl_payment(
         lud16=lud16,
         msat_amount=msat_amount,
@@ -772,21 +735,108 @@ async def is_feeder_override_enabled():
 @http_retry
 async def trigger_feeder():
     try:
-        response = await http_client.post(
+        feeder_trigger_response = await http_client.post(
             f'{config["OPENHAB_URL"]}/rest/rules/88bd9ec4de/runnow',
             auth=(config['OH_AUTH_1'], '')
         )
-        response.raise_for_status()
-        return response.status_code == 200
+        feeder_trigger_response.raise_for_status()
+        return feeder_trigger_response.status_code == 200
     except httpx.HTTPError as e:
-        logger.error(f"HTTP error triggering feeder: {e}")
+        logger.error(f"HTTP error triggering feeder or GoatFeedingsIncrement rule: {e}")
         raise HTTPException(
             status_code=e.response.status_code if e.response else 500,
-            detail="Failed to trigger the feeder rule"
+            detail="Failed to trigger the feeder and GoatFeedingsIncrement rule"
         )
     except Exception as e:
-        logger.error(f"Error triggering the feeder rule: {e}")
+        logger.error(f"Error triggering the feeder and GoatFeedingsIncrement rule: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+        
+@http_retry
+async def get_goat_feedings():
+    try:
+        auth = (config['OH_AUTH_1'], '')
+        headers = {"accept": "text/plain"}
+        get_url = f"{config['OPENHAB_URL']}/rest/items/GoatFeedings/state"
+        response = await http_client.get(get_url, headers=headers, auth=auth)
+        response.raise_for_status()
+
+        try:
+            feedings = int(response.text.strip())
+        except Exception as e:
+            logger.warning(f"Failed to parse GoatFeedings state '{response.text.strip()}': {e}. Defaulting to 0.")
+            feedings = 0
+
+        logger.info(f"Returning latest GoatFeedings state: {feedings}")
+        return feedings
+
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error retrieving GoatFeedings state from OpenHAB: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch GoatFeedings state from OpenHAB")
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving GoatFeedings state: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error retrieving GoatFeedings state")
+      
+@http_retry
+async def get_goat_sats_sum_today():
+    """Get GoatSats state, preferring cached value if available."""
+    try:
+        # Try to get from cache first
+        cached_state = await cache.get("goat_sats_state")
+        if cached_state is not None:
+            logger.debug("Using cached GoatSats state")
+            return {"sum_goat_sats": cached_state}
+
+        # If not in cache, fetch from OpenHAB
+        auth = (config['OH_AUTH_1'], '')
+        headers = {"accept": "text/plain"}
+        get_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
+        response = await http_client.get(get_url, headers=headers, auth=auth)
+        response.raise_for_status()
+        
+        try:
+            latest_state = int(float(response.text.strip()))
+            # Cache the result without TTL
+            await cache.set("goat_sats_state", latest_state)
+            logger.info(f"Updated cached GoatSats state to: {latest_state}")
+            return {"sum_goat_sats": latest_state}
+        except Exception as e:
+            logger.warning(f"Failed to parse GoatSats state '{response.text.strip()}': {e}. Defaulting to 0.")
+            return {"sum_goat_sats": 0}
+    
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error retrieving GoatSats state from OpenHAB: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch GoatSats state from OpenHAB")
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving GoatSats state: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error retrieving GoatSats state")
+
+@http_retry
+async def update_goat_sats(sats_received: int):
+    """Update GoatSats state in both cache and OpenHAB."""
+    try:
+        # Get current state (preferring cache)
+        current_state_data = await get_goat_sats_sum_today()
+        current_state = current_state_data["sum_goat_sats"]
+        new_state = current_state + sats_received
+        
+        # Update OpenHAB
+        auth = (config['OH_AUTH_1'], '')
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "text/plain"
+        }
+        put_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
+        put_response = await http_client.put(put_url, headers=headers, auth=auth, content=str(new_state))
+        put_response.raise_for_status()
+        
+        # Update cache without TTL
+        await cache.set("goat_sats_state", new_state)
+        logger.info(f"Updated GoatSats state to {new_state} (cache + OpenHAB)")
+    
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error updating GoatSats in OpenHAB: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error updating GoatSats: {e}")
 
 @retry(
     reraise=True,
@@ -798,61 +848,78 @@ async def process_payment_data(payment_data):
     try:
         payment = payment_data.get('payment', {})
         payment_amount = payment.get('amount', 0)
-
+        sats_received = payment_amount // 1000
         wallet_balance = payment_data.get('wallet_balance')
-        
-        async with app_state.lock:
-            app_state.balance = math.floor(wallet_balance)
+        logger.info(f"Received payment: {payment}")
 
-        # Check for Nostr data and handle CyberHerd addition
-        nostr_data_raw = payment.get('extra', {}).get('nostr')
+        if wallet_balance is not None:
+            async with app_state.lock:
+                app_state.balance = math.floor(wallet_balance)
+        else:
+            logger.warning("No wallet_balance provided in payment_data; skipping balance update.")
+
+        if sats_received > 0:
+            await update_goat_sats(sats_received)
+
+        extra = payment.get('extra', {})
+
+        # Rely solely on nostr_data_raw to determine if this is a zap payment.
+        nostr_data_raw = None
+        if isinstance(extra, dict):
+            if 'nostr' in extra:
+                nostr_data_raw = extra['nostr']
+            elif 'extra' in extra and isinstance(extra['extra'], dict):
+                nostr_data_raw = extra['extra'].get('nostr')
+
         feeder_triggered = False
         new_cyberherd_record_created = False
 
-        if nostr_data_raw and payment_amount >= 10000:
+        if nostr_data_raw:
             try:
                 nostr_data = json.loads(nostr_data_raw)
                 pubkey = nostr_data.get('pubkey')
-                note = nostr_data.get('id')  # Use zap event ID as note
-
-                # Extract the event kind from the Nostr data
+                note = nostr_data.get('id')
                 event_kind = nostr_data.get('kind')
-                kinds = [event_kind]
-
-                amount_sats = payment_amount / 1000
-
-                # Extract the 'e' tag (zapped note ID)
-                event_id = next((tag[1] for tag in nostr_data.get('tags', []) if tag[0] == 'e'), None)
+                kinds = [event_kind] if event_kind is not None else []
+                event_id = None
+                for tag in nostr_data.get('tags', []):
+                    if isinstance(tag, list) and len(tag) > 1 and tag[0] == 'e':
+                        event_id = tag[1]
+                        break
 
                 if pubkey and event_id:
-                    # Check for CyberHerd tag
                     if await check_cyberherd_tag(event_id):
-                        # Fetch metadata for the pubkey
+                        # Try to extract the relays from the nostr data's tags.
+                        relay_tag = None
+                        for tag in nostr_data.get("tags", []):
+                            if isinstance(tag, list) and tag and tag[0] == "relays":
+                                relay_tag = tag
+                                break
+                        if relay_tag and len(relay_tag) > 1:
+                            # Use the first three relay URLs from the tag.
+                            user_relays = relay_tag[1:4]
+                            logger.info(f"Using relays from nostr data for {pubkey}: {user_relays}")
+                        else:
+                            user_relays = await lookup_relay_list(pubkey)
+                            logger.info(f"Using lookup relays for {pubkey}: {user_relays}")
+
                         metadata_fetcher = MetadataFetcher()
-                        metadata = await metadata_fetcher.lookup_metadata(pubkey)
+                        metadata = await metadata_fetcher.lookup_metadata(pubkey, user_relays)
 
                         if metadata:
                             lud16 = metadata.get('lud16')
-                            nip05 = metadata.get('nip05')
                             display_name = metadata.get('display_name', 'Anon')
-
-                            # Verify lud16 and nip05
+                            picture = metadata.get('picture')
                             is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
-                            #is_valid_nip05 = nip05 and await Verifier.verify_nip05(nip05, pubkey)
 
                             if not is_valid_lud16:
-                                logger.warning(
-                                    f"Record rejected for pubkey {pubkey}: "
-                                    f"Valid lud16={is_valid_lud16}"
-                                )
+                                logger.warning(f"Record rejected for pubkey {pubkey}: Valid lud16={is_valid_lud16}")
                             else:
                                 nprofile = await generate_nprofile(pubkey)
                                 if not nprofile:
                                     logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
                                 else:
-                                    logger.info(f"generated nprofile: {nprofile} for {pubkey}")
-
-                                    # Create CyberHerdData instance with dynamic kinds
+                                    logger.info(f"Generated nprofile: {nprofile} for {pubkey}")
                                     new_member_data = CyberHerdData(
                                         display_name=display_name,
                                         event_id=event_id,
@@ -863,10 +930,10 @@ async def process_payment_data(payment_data):
                                         lud16=lud16,
                                         notified=None,
                                         payouts=0.0,
-                                        amount=amount_sats
+                                        amount=sats_received,
+                                        picture=picture,
+                                        relays=user_relays
                                     )
-                                    
-                                    #TODO: remove this part after implementing cyberherd payments.  (It's the splits ext)
                                     logger.info(f"Calling update_cyber_herd() with {new_member_data}")
                                     result = await update_cyber_herd([new_member_data])
                                     if result and result.get("new_members_added", 0) > 0:
@@ -882,35 +949,29 @@ async def process_payment_data(payment_data):
             except Exception as e:
                 logger.error(f"Error processing Nostr data: {e}")
 
-        # Check for feeder trigger (regardless of new membership)
-        if payment_amount > 0 and not await is_feeder_override_enabled():
+        if sats_received > 0 and not await is_feeder_override_enabled():
             if app_state.balance >= TRIGGER_AMOUNT_SATS:
                 if await trigger_feeder():
                     feeder_triggered = True
                     logger.info("Feeder triggered successfully.")
                     
-                    #TODO:  makes cyberherd payments
                     status = await send_payment(app_state.balance)
 
                     if status['success']:
-                        # Send a "feeder_triggered" message
                         feeder_msg, _ = await messaging.make_messages(
                             config['NOS_SEC'],
-                            int(payment_amount / 1000),
+                            sats_received,
                             0,
                             "feeder_triggered"
                         )
                         await send_messages_to_clients(feeder_msg)
 
-            # If feeder not triggered, do the usual "sats_received" fallback if no new members
             if not feeder_triggered and not new_cyberherd_record_created:
                 difference = TRIGGER_AMOUNT_SATS - app_state.balance
-
-                # default payment message (not a zap)
-                if (payment_amount / 1000) >= 10:
+                if sats_received >= 10:
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
-                        int(payment_amount / 1000), 
+                        sats_received, 
                         difference, 
                         "sats_received"
                     )
@@ -921,6 +982,7 @@ async def process_payment_data(payment_data):
     except Exception as e:
         logger.error(f"Error processing payment data: {e}")
         raise
+
 
 @http_retry
 async def send_payment(balance: int):
@@ -941,35 +1003,10 @@ async def get_balance_route(force_refresh: bool = False):
     balance_value = await get_balance(force_refresh)
     return {"balance": balance_value}
 
-@app.post("/create-invoice/{amount}")
-async def create_invoice_route(
-    amount: int = Path(..., description="The amount for the invoice in satoshis"),
-    memo: str = Query("Default memo", description="The memo for the invoice")
-):
-    try:
-        payment_request = await create_invoice(amount, memo)
-        return {"payment_request": payment_request}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /create-invoice route: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-# ---------------------------------------------------------------------------
-#                     REFACTORED CYBER HERD ENDPOINT & HELPERS
-# ---------------------------------------------------------------------------
-
 @app.post("/cyber_herd")
 async def update_cyber_herd(data: List[CyberHerdData]):
-    """
-    Refactored endpoint for adding/updating CyberHerd members, using real 'amount',
-    'difference', 'spots_remaining' as before. Sends 'cyber_herd' messages and 
-    schedules notifications for new/special members.
-    """
     try:
         should_get_balance = any(9734 not in item.kinds for item in data)
-
-        # Get current herd size once
         query = "SELECT COUNT(*) as count FROM cyber_herd"
         result = await database.fetch_one(query)
         current_herd_size = result['count']
@@ -984,10 +1021,8 @@ async def update_cyber_herd(data: List[CyberHerdData]):
         for item in data:
             item_dict = item.dict()
             pubkey = item_dict['pubkey']
-
             logger.debug(f"Processing pubkey: {pubkey} with kinds: {item_dict['kinds']}")
 
-            # Check if member exists
             check_query = """
                 SELECT COUNT(*) as count, kinds, notified 
                 FROM cyber_herd 
@@ -1015,17 +1050,14 @@ async def update_cyber_herd(data: List[CyberHerdData]):
                     targets_to_update=targets_to_update
                 )
 
-        # Recalculate LNbits targets if needed
         if targets_to_update:
             await update_lnbits_targets(targets_to_update)
 
-        # Update balance if needed
         if should_get_balance:
             await update_system_balance()
 
         difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
 
-        # Schedule notifications in one task
         if members_to_notify:
             await process_notifications(
                 members_to_notify,
@@ -1045,17 +1077,20 @@ async def update_cyber_herd(data: List[CyberHerdData]):
         logger.error(f"Failed to update cyber herd: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-
 async def process_new_member(
     item_dict: dict, 
     members_to_notify: list, 
     targets_to_update: list
 ):
-    """Insert a brand-new member into the database and mark for LNbits updates."""
+    """Process a new member joining the cyber herd."""
     pubkey = item_dict['pubkey']
     item_dict['notified'] = None
-    
-    # Convert 'kinds' to a comma-separated string if needed
+
+    # If relays not provided, use default configuration
+    if 'relays' not in item_dict or not item_dict['relays']:
+        item_dict['relays'] = RELAYS[:2]
+
+    # Ensure 'kinds' is a comma-separated string
     if isinstance(item_dict['kinds'], list):
         item_dict['kinds'] = ','.join(map(str, item_dict['kinds']))
     elif isinstance(item_dict['kinds'], str):
@@ -1064,13 +1099,20 @@ async def process_new_member(
         logger.warning(f"Unexpected type for 'kinds': {type(item_dict['kinds'])}")
         item_dict['kinds'] = ''
 
+    # Parse kinds into integers and calculate payouts if kind 9734 is present
+    kinds_int = parse_kinds(item_dict['kinds'])
+    if 9734 in kinds_int:
+        item_dict["payouts"] = calculate_payout(item_dict.get("amount", 0))
+    else:
+        item_dict["payouts"] = item_dict.get("payouts", 0.0)
+
     insert_query = """
         INSERT INTO cyber_herd (
             pubkey, display_name, event_id, note, kinds, nprofile, lud16, 
-            notified, payouts, amount
+            notified, payouts, amount, picture
         ) VALUES (
-            :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, 
-            :lud16, :notified, :payouts, :amount
+            :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, 
+            :notified, :payouts, :amount, :picture
         )
     """
     try:
@@ -1083,29 +1125,28 @@ async def process_new_member(
             "nprofile": item_dict.get("nprofile"),
             "lud16": item_dict.get("lud16"),
             "notified": None,
-            "payouts": item_dict.get("payouts", 0.0),
-            "amount": item_dict.get("amount", 0)
+            "payouts": item_dict["payouts"],
+            "amount": item_dict.get("amount", 0),
+            "picture": item_dict.get("picture")
         })
         
-        # Mark this new member for notification
         members_to_notify.append({
             'pubkey': pubkey,
             'type': 'new_member',
             'data': item_dict
         })
         
-        # If they have a lud16, update LNbits targets
-        if item_dict['lud16']:
+        # If a valid lud16 is provided and kind 7 is not present, add to targets update list
+        if item_dict['lud16'] and 7 not in kinds_int:
             targets_to_update.append({
                 'wallet': item_dict['lud16'],
                 'alias': pubkey,
-                'payouts': item_dict.get("payouts", 0.0)
+                'payouts': item_dict["payouts"]
             })
         
         logger.info(f"Inserted new member with pubkey: {pubkey}")
     except Exception as e:
         logger.error(f"Failed to insert new member with pubkey {pubkey}: {e}")
-
 
 async def process_existing_member(
     item_dict: dict, 
@@ -1117,7 +1158,6 @@ async def process_existing_member(
     """Handle updates to an existing member in the cyber herd."""
     pubkey = item_dict['pubkey']
     new_amount = item_dict.get('amount', 0)
-
     kinds_int = parse_kinds(item.kinds)
     if not kinds_int:
         return
@@ -1134,13 +1174,16 @@ async def process_existing_member(
 
         # Notify if the member wasn't previously "notified"
         if result["notified"] is None:
+            member_data = {
+                **item_dict,
+                'payout_increment': payout_increment,
+                'picture': item_dict.get('picture'),  # Include picture
+                'relays': item_dict.get('relays', [])[:2]  # Include first 2 relays
+            }
             members_to_notify.append({
                 'pubkey': pubkey,
                 'type': 'special_kinds',
-                'data': {
-                    **item_dict,
-                    'payout_increment': payout_increment
-                }
+                'data': member_data
             })
 
         await update_member_record(
@@ -1159,7 +1202,6 @@ async def process_existing_member(
             })
 
 def parse_kinds(kinds: Union[List[int], str]) -> List[int]:
-    """Parse 'kinds' into a list of ints."""
     if isinstance(kinds, list):
         return kinds
     elif isinstance(kinds, str):
@@ -1173,7 +1215,6 @@ def parse_kinds(kinds: Union[List[int], str]) -> List[int]:
         return []
 
 def parse_current_kinds(kinds_str: str) -> Set[int]:
-    """Parse DB 'kinds' string into a set of ints."""
     if not kinds_str:
         return set()
     try:
@@ -1187,25 +1228,19 @@ def calculate_member_updates(
     current_kinds: Set[int],
     new_amount: int
 ) -> Tuple[float, str]:
-    """
-    Recalculate how much to add to 'payouts' based on newly-seen kinds.
-    - For kinds 6 & 7, we add a small bonus only once (the first time).
-    - For kind 9734, we *always* add 'calculate_payout(new_amount)' 
-      so repeated zaps keep raising payouts.
-    """
     payout_increment = 0.0
 
     if 9734 in kinds_int:
-        payout_increment += calculate_payout(float(new_amount))
+        zap_payout = calculate_payout(float(new_amount))
+        payout_increment += zap_payout
 
     new_special_kinds = [k for k in [6, 7] if k in kinds_int and k not in current_kinds]
     for k in new_special_kinds:
         if k == 7:
-            payout_increment += 0.1
+            payout_increment += 0.0
         elif k == 6:
             payout_increment += 0.2
 
-    # Merge new kinds into existing
     updated_kinds_set = current_kinds.union(set(kinds_int))
     updated_kinds_str = ','.join(map(str, sorted(updated_kinds_set)))
 
@@ -1228,10 +1263,19 @@ async def update_member_record(
             note = :note,
             display_name = :display_name,
             nprofile = :nprofile,
-            lud16 = :lud16
+            lud16 = :lud16,
+            picture = :picture,
+            relays = :relays
         WHERE pubkey = :pubkey
     """
     try:
+        # Ensure relays are present in item_dict
+        if 'relays' not in item_dict or not item_dict['relays']:
+            item_dict['relays'] = RELAYS[:2]
+
+        # Convert relays list to JSON string for storage
+        relays_json = json.dumps(item_dict['relays'])
+        
         await database.execute(update_query, values={
             "new_amount": new_amount,
             "payout_increment": payout_increment,
@@ -1241,6 +1285,8 @@ async def update_member_record(
             "display_name": item_dict.get("display_name") or "Anon",
             "nprofile": item_dict.get("nprofile"),
             "lud16": item_dict.get("lud16"),
+            "picture": item_dict.get("picture"),
+            "relays": relays_json,
             "pubkey": pubkey
         })
         logger.info(f"Updated member with pubkey: {pubkey}")
@@ -1248,10 +1294,6 @@ async def update_member_record(
         logger.error(f"Failed to update member with pubkey {pubkey}: {e}")
 
 async def update_lnbits_targets(targets: List[dict]):
-    """
-    Fetch existing LNbits targets, merge with current DB data,
-    and update LNbits in one shot.
-    """
     try:
         initial_targets = await fetch_cyberherd_targets()
         current_members = await database.fetch_all(
@@ -1281,7 +1323,6 @@ async def update_lnbits_targets(targets: List[dict]):
         logger.error(f"Failed to update LNbits targets: {e}")
 
 async def update_system_balance():
-    """Refresh the LNbits wallet balance in the global app_state."""
     try:
         response = await get_balance_route(force_refresh=True)
         balance_value = response.get("balance", 0)
@@ -1303,10 +1344,13 @@ async def process_notifications(
                 member_type = member.get('type', 'unspecified')
                 member_data = member.get('data', {})
 
+                # Ensure member_data has relays
+                if not member_data.get('relays'):
+                    member_data['relays'] = RELAYS[:2]
+
                 try:
                     spots_remaining = MAX_HERD_SIZE - current_herd_size
 
-                    # Call make_messages for "cyber_herd"
                     message_content, raw_command_output = await messaging.make_messages(
                         config['NOS_SEC'],
                         member_data.get('amount', 0),
@@ -1316,24 +1360,16 @@ async def process_notifications(
                         spots_remaining
                     )
 
-                    # Broadcast the message
                     await send_messages_to_clients(message_content)
-
-                    # Update the 'notified' field in DB
                     await update_notified_field(pubkey, raw_command_output)
 
                 except Exception as e:
-                    # Log exceptions for each individual member
                     logger.exception(f"Failed to process notification for {member_type} - {pubkey}: {e}")
 
     except Exception as e:
-        # Log any higher-level failures in the
         logger.exception(f"process_notifications failed with an error: {e}")
 
 async def update_notified_field(pubkey: str, raw_command_output: str):
-    """
-    Update the 'notified' field with the 'id' from the raw_command_output (or default).
-    """
     update_notified_query = """
         UPDATE cyber_herd 
         SET notified = :notified_value 
@@ -1350,9 +1386,11 @@ async def update_notified_field(pubkey: str, raw_command_output: str):
         update_notified_query,
         values={"notified_value": notified_value, "pubkey": pubkey}
     )
-# ---------------------------------------------------------------------------
-
-
+    
+async def get_cyberherd_list() -> List[Dict[str, any]]:
+    query = "SELECT * FROM cyber_herd"
+    return await database.fetch_all(query)
+    
 @app.get("/get_cyber_herd")
 async def get_cyber_herd():
     try:
@@ -1366,30 +1404,22 @@ async def get_cyber_herd():
 @app.get("/reset_cyber_herd")
 async def reset_cyber_herd():
     try:
-        # Clear the `cyber_herd` table
         await database.execute("DELETE FROM cyber_herd")
         logger.info("CyberHerd table cleared successfully.")
-
-        # Reset LNBits targets
         headers = {
             'accept': 'application/json',
             'X-API-KEY': config['CYBERHERD_KEY']
         }
         url = f"{config['LNBITS_URL']}/splitpayments/api/v1/targets"
-
-        # Delete all existing targets
         response = await http_client.delete(url, headers=headers)
         response.raise_for_status()
         logger.info("Existing CyberHerd targets deleted successfully.")
-
-        # Add predefined wallet target with 100% allocation
         predefined_wallet = {
             'wallet': config['PREDEFINED_WALLET_ADDRESS'],
             'alias': config['PREDEFINED_WALLET_ALIAS'],
             'percent': PREDEFINED_WALLET_PERCENT_RESET
         }
         new_targets = {"targets": [predefined_wallet]}
-
         create_response = await http_client.put(
             url,
             headers={
@@ -1401,7 +1431,6 @@ async def reset_cyber_herd():
         )
         create_response.raise_for_status()
         logger.info("Predefined CyberHerd target created with 100% allocation.")
-
         return {
             "status": "success",
             "message": "CyberHerd reset successfully with predefined target at 100% allocation."
@@ -1418,26 +1447,54 @@ async def reset_cyber_herd():
 async def delete_cyber_herd(lud16: str):
     try:
         logger.info(f"Attempting to delete record with lud16: {lud16}")
-
-        # Check if the record exists in the database
         select_query = "SELECT * FROM cyber_herd WHERE lud16 = :lud16"
         record = await database.fetch_one(select_query, values={"lud16": lud16})
-
         if not record:
             logger.warning(f"No record found with lud16: {lud16}")
             raise HTTPException(status_code=404, detail="Record not found")
-
-        # Delete the record from the cyber_herd table
         delete_query = "DELETE FROM cyber_herd WHERE lud16 = :lud16"
         await database.execute(delete_query, values={"lud16": lud16})
         logger.info(f"Record with lud16 {lud16} deleted successfully.")
-
         return {"status": "success", "message": f"Record with lud16 {lud16} deleted successfully."}
     except HTTPException as e:
         raise e
     except Exception as e:
         logger.error(f"Failed to delete record: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+        
+@app.put("/goat_sats/set")
+async def set_goat_sats_endpoint(data: SetGoatSatsData):
+    try:
+        auth = (config['OH_AUTH_1'], '')
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "text/plain"
+        }
+        new_state = data.new_amount
+        put_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
+        put_response = await http_client.put(put_url, headers=headers, auth=auth, content=str(new_state))
+        put_response.raise_for_status()
+        
+        # Update cache without TTL
+        await cache.set("goat_sats_state", new_state)
+        logger.info(f"Manually set GoatSats in OpenHAB to {new_state} sats")
+        return {"status": "success", "new_state": new_state}
+    
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error setting GoatSats in OpenHAB: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update GoatSats in OpenHAB")
+    except Exception as e:
+        logger.error(f"Unexpected error setting GoatSats: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error setting GoatSats")
+        
+@app.get("/goat_sats/sum_today")
+async def get_goat_sats_sum_today_endpoint():
+    return await get_goat_sats_sum_today()
+    
+@app.get("/goat_sats/feedings")
+async def get_goat_feedings_endpoint():
+    feedings = await get_goat_feedings()
+    return {"goat_feedings": feedings}
 
 @app.get("/trigger_amount")
 async def get_trigger_amount_route():
@@ -1466,18 +1523,6 @@ async def feeder_status():
         logger.error(f"Error in /feeder_status route: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@app.post("/send-payment")
-async def send_payment_route(payment_request: PaymentRequest):
-    try:
-        result = await send_payment(payment_request.balance)
-        return result
-    except HTTPException as e:
-        logger.error(f"HTTPException occurred: {e.detail}")
-        raise HTTPException(status_code=500, detail="Failed to process payment request.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
-
 @app.get("/cyberherd/spots_remaining")
 async def get_cyberherd_spots_remaining():
     try:
@@ -1491,7 +1536,25 @@ async def get_cyberherd_spots_remaining():
     except Exception as e:
         logger.error(f"Error retrieving remaining CyberHerd spots: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+        
+@app.post("/messages/cyberherd_treats")
+async def handle_cyberherd_treats(data: CyberHerdTreats):
+    try:
+        pubkey = data.pubkey
+        amount = data.amount
+        cyber_herd_list = await get_cyberherd_list()
+        cyber_herd_dict = {item['pubkey']: item for item in cyber_herd_list}
 
+        if pubkey in cyber_herd_dict:
+            message, _ = await messaging.make_messages(config['NOS_SEC'], amount, 0, "cyber_herd_treats", cyber_herd_dict[pubkey])
+            await send_messages_to_clients(message)
+            return {"status": "success"}
+        else:
+            return {"status": "error", "message": "Invalid pubkey"}
+    except Exception as e:
+        logger.error(f"Error in /messages/cyberherd_treats route: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @app.get("/ws")
 async def redirect_ws():
     return {"message": "Redirecting to /ws/"}
@@ -1505,7 +1568,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # We don't process client messages here currently, but we could if needed
             await websocket.receive_text()
     except Exception as e:
         logger.warning(f"WebSocket connection error: {e}")
