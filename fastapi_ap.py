@@ -37,7 +37,7 @@ from tenacity import (
 )
 
 import messaging
-from utils.cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag
+from utils.cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag, lookup_relay_list
 from utils.nostr_signing import sign_event, sign_zap_event
 
 # Configuration and Constants
@@ -344,9 +344,6 @@ async def schedule_daily_reset():
         await asyncio.sleep(sleep_seconds)
 
         status = await reset_cyber_herd()
-        
-        if status['success'] and app_state.balance:
-            await send_payment(app_state.balance)
                         
 class DatabaseCache:
     def __init__(self, db):
@@ -415,10 +412,15 @@ async def periodic_informational_messages():
             await send_messages_to_clients(message)
 
 def calculate_payout(amount: float) -> float:
-    units = (amount + 9) // 10  # Ceiling division for multiples of 10
-    payout = units * 0.01  # Each 10 sats = 0.01 payout
-    payout = max(0.3, min(payout, 1.0))
-    return payout
+    """Calculate payout based on the amount received (e.g., for zaps)."""
+    if amount < 10:
+        return 0.0
+    # Calculate payout units for every 10 sats (floor division)
+    units = amount // 10
+    payout = units * 0.01
+    # Apply min/max bounds
+    payout = min(payout, 1.0)
+    return round(payout, 2)
 
 @http_retry
 async def fetch_cyberherd_targets():
@@ -589,13 +591,14 @@ async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KE
             "Content-Type": "application/json"
         }
         data = {
-            "out": False,
+            "out": False,  # Generate an invoice
             "amount": amount,
-            "memo": memo,
+            "unit": "sat",
+            "memo": memo
         }
         response = await http_client.post(url, json=data, headers=headers)
         response.raise_for_status()
-        return response.json()['payment_request']
+        return response.json().get('bolt11')  # Return the BOLT11 invoice
     except httpx.HTTPError as e:
         logger.error(f"HTTP error creating invoice: {e}")
         raise
@@ -612,12 +615,13 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
             "Content-Type": "application/json"
         }
         data = {
-            "out": True,
-            "bolt11": payment_request
+            "out": True,  # Pay an invoice
+            "unit": "sat",  # Specify the unit as "sat"
+            "bolt11": payment_request  # Supply the BOLT11 invoice
         }
         response = await http_client.post(url, json=data, headers=headers)
         response.raise_for_status()
-        return response.json()
+        return response.json()  # Return the payment response
     except httpx.HTTPError as e:
         logger.error(f"HTTP error paying invoice: {e}")
         raise
@@ -863,91 +867,8 @@ async def process_payment_data(payment_data):
 
         extra = payment.get('extra', {})
 
-        # Rely solely on nostr_data_raw to determine if this is a zap payment.
-        nostr_data_raw = None
-        if isinstance(extra, dict):
-            if 'nostr' in extra:
-                nostr_data_raw = extra['nostr']
-            elif 'extra' in extra and isinstance(extra['extra'], dict):
-                nostr_data_raw = extra['extra'].get('nostr')
-
         feeder_triggered = False
         new_cyberherd_record_created = False
-
-        if nostr_data_raw:
-            try:
-                nostr_data = json.loads(nostr_data_raw)
-                pubkey = nostr_data.get('pubkey')
-                note = nostr_data.get('id')
-                event_kind = nostr_data.get('kind')
-                kinds = [event_kind] if event_kind is not None else []
-                event_id = None
-                for tag in nostr_data.get('tags', []):
-                    if isinstance(tag, list) and len(tag) > 1 and tag[0] == 'e':
-                        event_id = tag[1]
-                        break
-
-                if pubkey and event_id:
-                    if await check_cyberherd_tag(event_id):
-                        # Try to extract the relays from the nostr data's tags.
-                        relay_tag = None
-                        for tag in nostr_data.get("tags", []):
-                            if isinstance(tag, list) and tag and tag[0] == "relays":
-                                relay_tag = tag
-                                break
-                        if relay_tag and len(relay_tag) > 1:
-                            # Use the first three relay URLs from the tag.
-                            user_relays = relay_tag[1:4]
-                            logger.info(f"Using relays from nostr data for {pubkey}: {user_relays}")
-                        else:
-                            user_relays = await lookup_relay_list(pubkey)
-                            logger.info(f"Using lookup relays for {pubkey}: {user_relays}")
-
-                        metadata_fetcher = MetadataFetcher()
-                        metadata = await metadata_fetcher.lookup_metadata(pubkey, user_relays)
-
-                        if metadata:
-                            lud16 = metadata.get('lud16')
-                            display_name = metadata.get('display_name', 'Anon')
-                            picture = metadata.get('picture')
-                            is_valid_lud16 = lud16 and await Verifier.verify_lud16(lud16)
-
-                            if not is_valid_lud16:
-                                logger.warning(f"Record rejected for pubkey {pubkey}: Valid lud16={is_valid_lud16}")
-                            else:
-                                nprofile = await generate_nprofile(pubkey)
-                                if not nprofile:
-                                    logger.warning(f"Failed to generate nprofile for pubkey: {pubkey}")
-                                else:
-                                    logger.info(f"Generated nprofile: {nprofile} for {pubkey}")
-                                    new_member_data = CyberHerdData(
-                                        display_name=display_name,
-                                        event_id=event_id,
-                                        note=note,
-                                        kinds=kinds,
-                                        pubkey=pubkey,
-                                        nprofile=nprofile,
-                                        lud16=lud16,
-                                        notified=None,
-                                        payouts=0.0,
-                                        amount=sats_received,
-                                        picture=picture,
-                                        relays=user_relays
-                                    )
-                                    logger.info(f"Calling update_cyber_herd() with {new_member_data}")
-                                    result = await update_cyber_herd([new_member_data])
-                                    if result and result.get("new_members_added", 0) > 0:
-                                        new_cyberherd_record_created = True
-                        else:
-                            logger.warning(f"Metadata lookup failed for pubkey: {pubkey}")
-                    else:
-                        logger.info(f"No 'CyberHerd' tag found for event_id: {event_id}")
-                else:
-                    logger.warning("Missing pubkey or event_id in Nostr data. Processing as normal payment.")
-            except json.JSONDecodeError:
-                logger.error("Invalid JSON in Nostr data.")
-            except Exception as e:
-                logger.error(f"Error processing Nostr data: {e}")
 
         if sats_received > 0 and not await is_feeder_override_enabled():
             if app_state.balance >= TRIGGER_AMOUNT_SATS:
@@ -1101,7 +1022,7 @@ async def process_new_member(
 
     # Parse kinds into integers and calculate payouts if kind 9734 is present
     kinds_int = parse_kinds(item_dict['kinds'])
-    if 9734 in kinds_int:
+    if 9735 in kinds_int:
         item_dict["payouts"] = calculate_payout(item_dict.get("amount", 0))
     else:
         item_dict["payouts"] = item_dict.get("payouts", 0.0)
@@ -1230,7 +1151,7 @@ def calculate_member_updates(
 ) -> Tuple[float, str]:
     payout_increment = 0.0
 
-    if 9734 in kinds_int:
+    if 9735 in kinds_int:
         zap_payout = calculate_payout(float(new_amount))
         payout_increment += zap_payout
 
