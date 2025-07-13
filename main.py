@@ -1,5 +1,5 @@
 from math import floor
-from typing import List, Optional, Dict, Set, Union, Tuple
+from typing import List, Optional, Dict, Set, Union, Tuple, Any
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Path, Query, Depends, Request
 from fastapi.responses import JSONResponse
@@ -41,9 +41,11 @@ from utils.cyberherd_module import MetadataFetcher, Verifier, generate_nprofile,
 from utils.nostr_signing import sign_event, sign_zap_event
 
 # Configuration and Constants
-MAX_HERD_SIZE = int(os.getenv('MAX_HERD_SIZE', 10))
+MAX_HERD_SIZE = 3
 PREDEFINED_WALLET_PERCENT_RESET = 100
-TRIGGER_AMOUNT_SATS = 1000
+TRIGGER_AMOUNT_SATS = 850
+HEADBUTT_MIN_SATS = 10
+HEADBUTT_COOLDOWN_SECONDS = 1
 
 # Add relay configuration
 RELAYS = [
@@ -81,6 +83,7 @@ class AppState:
     def __init__(self):
         self.balance: int = 0
         self.lock = Lock()
+        self.last_headbutt_time: float = 0  # Track last headbutt time
 
 app_state = AppState()
 
@@ -933,8 +936,18 @@ async def update_cyber_herd(data: List[CyberHerdData]):
         current_herd_size = result['count']
 
         if current_herd_size >= MAX_HERD_SIZE:
-            logger.info(f"Herd full: {current_herd_size} members")
-            return {"status": "herd full"}
+            logger.info(f"Herd full: {current_herd_size} members - attempting headbutting")
+            # Process headbutting attempts when herd is full
+            headbutt_results = await process_headbutting_attempts(data)
+            if headbutt_results:
+                return {
+                    "status": "headbutt_success",
+                    "headbutts": headbutt_results
+                }
+            else:
+                # Send headbutt info message when herd is full but no headbutts occurred
+                await send_headbutt_info_message()
+                return {"status": "herd full"}
 
         members_to_notify = []
         targets_to_update = []
@@ -1458,6 +1471,57 @@ async def get_cyberherd_spots_remaining():
         logger.error(f"Error retrieving remaining CyberHerd spots: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
         
+@app.post("/headbutt")
+async def headbutt(data: dict):
+    try:
+        # Extract amount from request data
+        amount = data.get('amount', 0)
+        
+        # Check if amount meets minimum requirement
+        if amount < HEADBUTT_MIN_SATS:
+            return {
+                "status": "error",
+                "message": f"Minimum amount for headbutting is {HEADBUTT_MIN_SATS} sats"
+            }
+        
+        # Check cooldown period
+        current_time = time.time()
+        async with app_state.lock:
+            time_since_last_headbutt = current_time - app_state.last_headbutt_time
+            
+            if time_since_last_headbutt < HEADBUTT_COOLDOWN_SECONDS:
+                time_left = int(HEADBUTT_COOLDOWN_SECONDS - time_since_last_headbutt)
+                return {
+                    "status": "error",
+                    "message": f"Goats are still dizzy from the last headbutt. Try again in {time_left} seconds."
+                }
+                time_left = int(HEADBUTT_COOLDOWN_SECONDS - time_since_last_headbutt)
+                return {
+                    "status": "error",
+                    "message": f"Goats are still dizzy from the last headbutt. Try again in {time_left} seconds."
+                }
+            
+            # Process headbutt (successful)
+            app_state.last_headbutt_time = current_time
+        
+        # Generate a fun headbutt message
+        headbutt_message = f"🐐 HEADBUTT! The goats have been energized with {amount} sats!"
+        
+        # Send the message to all connected clients
+        await send_messages_to_clients(headbutt_message)
+        
+        # Log the headbutt
+        logger.info(f"Headbutt triggered with {amount} sats")
+        
+        return {
+            "status": "success",
+            "message": "Headbutt successful! The goats are energized!",
+            "amount": amount
+        }
+    
+    except Exception as e:
+        logger.error(f"Error processing headbutt: {e}")
+        raise HTTPException(status_code=500, detail="Error processing headbutt request")
 @app.post("/messages/cyberherd_treats")
 async def handle_cyberherd_treats(data: CyberHerdTreats):
     try:
@@ -1511,3 +1575,334 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": "Internal Server Error"}
     )
+
+async def process_headbutting_attempts(data: List[CyberHerdData]) -> List[Dict[str, Any]]:
+    """
+    Process headbutting attempts when the herd is full.
+    Only allows one headbutt attempt per cooldown period.
+    """
+    current_time = time.time()
+    
+    # Use app_state.lock to prevent concurrent headbutts
+    async with app_state.lock:
+        # Check cooldown
+        if current_time - app_state.last_headbutt_time < HEADBUTT_COOLDOWN_SECONDS:
+            remaining_cooldown = HEADBUTT_COOLDOWN_SECONDS - (current_time - app_state.last_headbutt_time)
+            logger.info(f"Headbutt cooldown active. {remaining_cooldown:.1f}s remaining")
+            return []
+        
+        results = []
+        
+        # Convert data to headbutt attempts and filter for valid zaps
+        headbutt_attempts = []
+        for item in data:
+            # Only process items with zap receipts (kind 9735) that have amount > 0
+            if 9735 in item.kinds and item.amount > 0:
+                headbutt_attempts.append(item)
+        
+        if not headbutt_attempts:
+            logger.info("No valid headbutt attempts found (need zap receipts with amount > 0)")
+            return []
+        
+        # Sort attempts by amount (highest first) to give priority to bigger zappers
+        headbutt_attempts.sort(key=lambda x: x.amount, reverse=True)
+        
+        # Process only the first (highest amount) attempt to prevent multiple messages
+        if headbutt_attempts:
+            attempt = headbutt_attempts[0]
+            try:
+                headbutt_result = await attempt_headbutt(attempt)
+                if headbutt_result:
+                    results.append(headbutt_result)
+                    app_state.last_headbutt_time = current_time
+                else:
+                    # If headbutt failed, we still update the cooldown to prevent spam
+                    app_state.last_headbutt_time = current_time
+            except Exception as e:
+                logger.error(f"Error processing headbutt attempt for {attempt.pubkey}: {e}")
+        
+        return results
+
+async def attempt_headbutt(attacker: CyberHerdData) -> Optional[Dict[str, Any]]:
+    """
+    Attempt to headbutt the member with the lowest zap amount.
+    Returns details of successful headbutt or None if failed.
+    """
+    try:
+        # Use database transaction for atomic operations
+        async with database.transaction():
+            # Find the member with the lowest zap amount
+            # Priority: Members with lowest amount (0 for repost-only, then lowest zaps)
+            query = """
+                SELECT pubkey, display_name, amount, lud16, nprofile 
+                FROM cyber_herd 
+                ORDER BY amount ASC, pubkey ASC 
+                LIMIT 1
+            """
+            
+            lowest_member = await database.fetch_one(query)
+            
+            if not lowest_member:
+                logger.error("No members found to headbutt")
+                return None
+            
+            # Check if attacker's zap amount is sufficient
+            # Must be at least HEADBUTT_MIN_SATS AND exceed the lowest member's amount
+            if lowest_member['amount'] == 0:
+                # Repost-only member - need at least minimum zap amount
+                required_amount = HEADBUTT_MIN_SATS
+            else:
+                # Member with zaps - need to exceed their amount AND meet minimum
+                required_amount = max(HEADBUTT_MIN_SATS, lowest_member['amount'] + 1)
+            
+            if attacker.amount < required_amount:
+                logger.info(f"Headbutt failed: {attacker.amount} sats not enough (need {required_amount} sats)")
+                # Send failure notification using the messaging system
+                await send_headbutt_failure_notification(attacker, required_amount)
+                return None
+            
+            # Perform the headbutt atomically
+            logger.info(f"Headbutt successful: {attacker.pubkey} ({attacker.amount} sats) replacing {lowest_member['pubkey']} ({lowest_member['amount']} sats)")
+            
+            # Remove the lowest member
+            await database.execute(
+                "DELETE FROM cyber_herd WHERE pubkey = :pubkey", 
+                values={"pubkey": lowest_member['pubkey']}
+            )
+            
+            # Add the new member
+            await add_new_headbutt_member(attacker)
+            
+            headbutt_result = {
+                "attacker": attacker.pubkey,
+                "victim": lowest_member['pubkey'],
+                "attacker_amount": attacker.amount,
+                "victim_amount": lowest_member['amount'],
+                "attacker_name": attacker.display_name or "Anon",
+                "victim_name": lowest_member['display_name'] or "Anon",
+                "attacker_nprofile": attacker.nprofile,
+                "victim_nprofile": lowest_member['nprofile']
+            }
+        
+        # Send notifications outside transaction (non-critical)
+        try:
+            await send_headbutt_success_notifications(attacker, lowest_member, headbutt_result)
+        except Exception as e:
+            logger.error(f"Failed to send headbutt notifications: {e}")
+        
+        # Update LNbits targets outside transaction (non-critical)
+        try:
+            await update_lnbits_targets_after_headbutt()
+        except Exception as e:
+            logger.error(f"Failed to update LNbits targets after headbutt: {e}")
+        
+        return headbutt_result
+        
+    except Exception as e:
+        logger.error(f"Database transaction failed during headbutt: {e}")
+        return None
+
+async def add_new_headbutt_member(member: CyberHerdData):
+    """Add a new member who successfully headbutted someone."""
+    # Set default relays if not provided
+    relays = member.relays or RELAYS[:2]
+    
+    # Ensure 'kinds' is a comma-separated string
+    if isinstance(member.kinds, list):
+        kinds_str = ','.join(map(str, member.kinds))
+    else:
+        kinds_str = str(member.kinds)
+    
+    # Calculate payouts for zap receipt
+    kinds_int = parse_kinds(member.kinds)
+    if 9735 in kinds_int:  # ZAP_RECEIPT
+        payouts = calculate_payout(member.amount)
+    else:
+        payouts = 0.0
+    
+    insert_query = """
+        INSERT INTO cyber_herd (
+            pubkey, display_name, event_id, note, kinds, nprofile, lud16, 
+            notified, payouts, amount, picture, relays
+        ) VALUES (
+            :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, 
+            :notified, :payouts, :amount, :picture, :relays
+        )
+    """
+    
+    await database.execute(insert_query, values={
+        "pubkey": member.pubkey,
+        "display_name": member.display_name or "Anon",
+        "event_id": member.event_id,
+        "note": member.note,
+        "kinds": kinds_str,
+        "nprofile": member.nprofile,
+        "lud16": member.lud16,
+        "notified": None,
+        "payouts": payouts,
+        "amount": member.amount,
+        "picture": member.picture,
+        "relays": json.dumps(relays)
+    })
+
+async def send_headbutt_failure_notification(attacker: CyberHerdData, required_amount: int):
+    """Send notification when headbutt attempt fails due to insufficient zaps."""
+    try:
+        # Create message data for headbutt failure
+        message_data = {
+            'attacker_name': attacker.display_name or 'Anon',
+            'attacker_amount': attacker.amount,
+            'required_amount': required_amount,
+            'attacker_pubkey': attacker.pubkey,
+            'event_id': attacker.event_id,
+            'attacker_nprofile': attacker.nprofile
+        }
+        
+        # Send via messaging system
+        message_content, raw_output = await messaging.make_messages(
+            config['NOS_SEC'],
+            attacker.amount,
+            0,
+            "headbutt_failure",
+            message_data,
+            0
+        )
+        
+        # Send to WebSocket clients
+        await send_messages_to_clients(message_content)
+        
+        logger.info(f"Sent headbutt failure notification for {attacker.pubkey}")
+    except Exception as e:
+        logger.error(f"Failed to send headbutt failure notification: {e}")
+
+async def send_headbutt_success_notifications(attacker: CyberHerdData, victim: dict, headbutt_result: dict):
+    """Send notifications for successful headbutt."""
+    try:
+        # Create message data for headbutt success
+        message_data = {
+            'attacker_name': attacker.display_name or 'Anon',
+            'attacker_amount': attacker.amount,
+            'victim_name': victim['display_name'] or 'Anon',
+            'victim_amount': victim['amount'],
+            'attacker_pubkey': attacker.pubkey,
+            'victim_pubkey': victim['pubkey'],
+            'event_id': attacker.event_id,
+            'attacker_nprofile': attacker.nprofile,
+            'victim_nprofile': victim['nprofile']
+        }
+        
+        # Send via messaging system
+        message_content, raw_output = await messaging.make_messages(
+            config['NOS_SEC'],
+            attacker.amount,
+            0,
+            "headbutt_success",
+            message_data,
+            0
+        )
+        
+        # Send to WebSocket clients
+        await send_messages_to_clients(message_content)
+        
+        # Update the attacker's notified field
+        if raw_output:
+            await update_notified_field(attacker.pubkey, raw_output)
+        
+        logger.info(f"Sent headbutt success notifications for {attacker.pubkey} replacing {victim['pubkey']}")
+    except Exception as e:
+        logger.error(f"Failed to send headbutt success notifications: {e}")
+
+async def send_headbutt_info_message():
+    """Send headbutt info message when herd is full but no headbutt attempts made."""
+    try:
+        # Get the lowest member (potential victim)
+        query = """
+            SELECT pubkey, display_name, amount, lud16, nprofile 
+            FROM cyber_herd 
+            ORDER BY amount ASC, pubkey ASC 
+            LIMIT 1
+        """
+        
+        lowest_member = await database.fetch_one(query)
+        
+        if not lowest_member:
+            logger.error("No members found for headbutt info")
+            return
+        
+        # Get a recent cyberherd member's event_id to reply to
+        # We'll use any member's event_id since they all represent cyberherd notes
+        recent_member_query = """
+            SELECT event_id
+            FROM cyber_herd 
+            ORDER BY ROWID DESC
+            LIMIT 1
+        """
+        
+        recent_member = await database.fetch_one(recent_member_query)
+        
+        if not recent_member or not recent_member['event_id']:
+            logger.error("No recent cyberherd event_id found for headbutt info")
+            return
+        
+        # Calculate required sats using same logic as headbutt
+        if lowest_member['amount'] == 0:
+            # Repost-only member - need at least minimum zap amount
+            required_amount = HEADBUTT_MIN_SATS
+        else:
+            # Member with zaps - need to exceed their amount AND meet minimum
+            required_amount = max(HEADBUTT_MIN_SATS, lowest_member['amount'] + 1)
+        
+        # Create context for the message
+        victim_name = lowest_member['display_name'] or 'Anon'
+        
+        # Send headbutt info message via messaging system
+        message_content, _ = await messaging.make_messages(
+            config['NOS_SEC'],
+            required_amount,
+            0,
+            "headbutt_info",
+            {
+                'required_sats': required_amount,
+                'victim_name': victim_name,
+                'victim_pubkey': lowest_member['pubkey'],
+                'event_id': recent_member['event_id']  # Add event_id for reply
+            }
+        )
+        
+        await send_messages_to_clients(f"⚡ CyberHerd full! Send {required_amount} sats to headbutt {victim_name} out!")
+        
+        logger.info(f"Sent headbutt info message: {required_amount} sats to headbutt {victim_name}")
+    except Exception as e:
+        logger.error(f"Failed to send headbutt info message: {e}")
+
+async def update_lnbits_targets_after_headbutt():
+    """Update LNbits targets after a successful headbutt."""
+    try:
+        # Get all current members
+        current_members = await database.fetch_all(
+            "SELECT lud16, pubkey, payouts FROM cyber_herd WHERE lud16 IS NOT NULL"
+        )
+        
+        all_targets = [
+            {
+                'wallet': member['lud16'],
+                'alias': member['pubkey'],
+                'payouts': member['payouts']
+            }
+            for member in current_members
+        ]
+
+        # Get initial targets and update
+        initial_targets = await fetch_cyberherd_targets()
+        updated_targets = await create_cyberherd_targets(
+            new_targets_data=all_targets,
+            initial_targets=initial_targets
+        )
+        
+        if updated_targets:
+            await update_cyberherd_targets(updated_targets)
+            logger.info("LNbits targets updated successfully after headbutt.")
+        else:
+            logger.warning("No targets to update for LNbits after headbutt.")
+    except Exception as e:
+        logger.error(f"Failed to update LNbits targets after headbutt: {e}")
