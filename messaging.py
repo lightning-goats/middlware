@@ -199,12 +199,27 @@ async def make_messages(
         required_sats = cyber_herd_item.get("required_sats", 0)
         victim_name = cyber_herd_item.get("victim_name", "Anon")
         victim_pubkey = cyber_herd_item.get("victim_pubkey", "")
+        victim_nprofile = cyber_herd_item.get("victim_nprofile", "")
         event_id = cyber_herd_item.get("event_id", "")
         
-        message = template.format(
+        # Ensure nprofile is well-formed
+        if victim_nprofile and not victim_nprofile.startswith("nostr:"):
+            victim_nprofile = f"nostr:{victim_nprofile}"
+        
+        # Create Nostr message with nprofile
+        nostr_message = template.format(
+            required_sats=required_sats,
+            victim_name=victim_nprofile if victim_nprofile else victim_name
+        )
+        
+        # Create client message with display name
+        client_message = template.format(
             required_sats=required_sats,
             victim_name=victim_name
         )
+        
+        # Use nostr_message for the command
+        message = nostr_message
         
         # Create Nostr command for headbutt info - reply to the cyberherd note
         if event_id:
@@ -221,6 +236,9 @@ async def make_messages(
                 f'--tag t=CyberHerd --tag t=HeadbuttInfo '
                 f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
             )
+        
+        # Override message for client formatting
+        message = client_message
 
     elif event_type == "headbutt_success":
         # Handle headbutt success message formatting
