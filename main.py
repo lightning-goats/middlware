@@ -45,7 +45,7 @@ MAX_HERD_SIZE = 3
 PREDEFINED_WALLET_PERCENT_RESET = 100
 TRIGGER_AMOUNT_SATS = 850
 HEADBUTT_MIN_SATS = 10
-HEADBUTT_COOLDOWN_SECONDS = 1
+HEADBUTT_COOLDOWN_SECONDS = 2
 
 # Add relay configuration
 RELAYS = [
@@ -84,6 +84,8 @@ class AppState:
         self.balance: int = 0
         self.lock = Lock()
         self.last_headbutt_time: float = 0  # Track last headbutt time
+        self.last_headbutt_info_time: float = 0  # Track last headbutt info message time
+        self.headbutt_info_event_ids: Set[str] = set()  # Track event_ids that have triggered headbutt info messages
 
 app_state = AppState()
 
@@ -946,7 +948,9 @@ async def update_cyber_herd(data: List[CyberHerdData]):
                 }
             else:
                 # Send headbutt info message when herd is full but no headbutts occurred
-                await send_headbutt_info_message()
+                # Extract event_ids from the current data to prevent duplicate messages
+                event_ids = [item.event_id for item in data if item.event_id]
+                await send_headbutt_info_message(event_ids)
                 return {"status": "herd full"}
 
         members_to_notify = []
@@ -1098,8 +1102,8 @@ async def process_existing_member(
 
     logger.debug(f"Parsed kinds for pubkey {pubkey}: {kinds_int}")
 
-    # Check if new special kinds arrived
-    if any(kind in [6, 7, 9734] for kind in kinds_int):
+    # Check if new special kinds arrived or zap receipts
+    if any(kind in [9735] for kind in kinds_int):
         current_kinds = parse_current_kinds(result["kinds"])
         
         payout_increment, updated_kinds_str = calculate_member_updates(
@@ -1812,9 +1816,23 @@ async def send_headbutt_success_notifications(attacker: CyberHerdData, victim: d
     except Exception as e:
         logger.error(f"Failed to send headbutt success notifications: {e}")
 
-async def send_headbutt_info_message():
-    """Send headbutt info message when herd is full but no headbutt attempts made."""
+async def send_headbutt_info_message(event_ids: Optional[List[str]] = None):
+    """Send headbutt info message when herd is full but no headbutt attempts made.
+    Only sends once per unique event_id to prevent duplicates."""
     try:
+        # If event_ids provided, check if we've already sent info for any of them
+        if event_ids:
+            # Check if any of the event_ids have already triggered a headbutt info message
+            if any(event_id in app_state.headbutt_info_event_ids for event_id in event_ids):
+                logger.debug("Headbutt info message already sent for one of these event_ids, skipping")
+                return
+        
+        # Check cooldown to prevent duplicate messages (use same cooldown as headbutts)
+        current_time = time.time()
+        if current_time - app_state.last_headbutt_info_time < HEADBUTT_COOLDOWN_SECONDS:
+            logger.debug("Headbutt info message cooldown active, skipping")
+            return
+        
         # Get the lowest member (potential victim)
         query = """
             SELECT pubkey, display_name, amount, lud16, nprofile 
@@ -1865,11 +1883,24 @@ async def send_headbutt_info_message():
                 'required_sats': required_amount,
                 'victim_name': victim_name,
                 'victim_pubkey': lowest_member['pubkey'],
+                'victim_nprofile': lowest_member['nprofile'],
                 'event_id': recent_member['event_id']  # Add event_id for reply
             }
         )
         
         await send_messages_to_clients(f"⚡ CyberHerd full! Send {required_amount} sats to headbutt {victim_name} out!")
+        
+        # Update the timestamp to prevent duplicate messages
+        app_state.last_headbutt_info_time = current_time
+        
+        # Track event_ids that triggered this headbutt info message
+        if event_ids:
+            app_state.headbutt_info_event_ids.update(event_ids)
+            # Keep the set size manageable (keep only last 100 event_ids)
+            if len(app_state.headbutt_info_event_ids) > 100:
+                # Remove oldest 50 entries (simple cleanup)
+                event_ids_list = list(app_state.headbutt_info_event_ids)
+                app_state.headbutt_info_event_ids = set(event_ids_list[-50:])
         
         logger.info(f"Sent headbutt info message: {required_amount} sats to headbutt {victim_name}")
     except Exception as e:
