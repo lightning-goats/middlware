@@ -62,6 +62,7 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 - Current herd: members with zap totals of [1000, 500, 200]
 - You zap: 250 sats → You replace the 200-sat member
 - New herd: [1000, 500, 250] (you're now in the herd)
+- The headbutted member's 200 sats are reset to zero
 
 **Scenario 2 - Failed headbutt:**
 - Current herd: members with zap totals of [1000, 500, 200 sats]  
@@ -73,13 +74,22 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 - You zap another 200 sats → Your total becomes 500 sats
 - Your payout share increases, harder to get headbutted out
 
+**Scenario 4 - Getting headbutted and rejoining:**
+- You're in the herd with 400 sats total
+- Someone headbutts you out with 450 sats → You lose your spot AND your previous zap amount is reset to zero
+- To rejoin: You must start fresh with a new zap that exceeds the current lowest member
+- Your accumulated amount from before getting headbutted is completely reset
+
 ### Protection Strategy:
 - **Build your total**: Multiple zaps accumulate, making you harder to headbutt
 - **Monitor the herd**: Check current members' contributions before zapping
 - **Stay active**: Regular zapping increases your "headbutt resistance"
+- **Risk awareness**: Getting headbutted means losing ALL accumulated sats - they don't carry over if you rejoin
 
 ### Headbutting Rules:
 - **Minimum zap**: 10 sats required to attempt headbutting
+- **Amount reset**: When headbutted out, your accumulated amount is completely reset to zero
+- **Fresh start**: To rejoin after being headbutted, you start with zero sats and must build up again
 - **Cooldown period**: 1-second cooldown after each successful headbutt
 - **Public notifications**: Both parties receive public reply notifications about headbutts
 - **Fair play**: System prevents rapid-fire headbutting attempts
@@ -119,6 +129,8 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 - **Zap-only system**: Only zaps count for membership
 - **Minimum 10 sats**: Zaps must be at least 10 sats to qualify for membership
 - **Cumulative system**: Your zap amounts add up over time, building your contribution
+- **Amount reset on headbutt**: If you get headbutted out, your accumulated amount is completely reset to zero
+- **Fresh start after headbutt**: Rejoining after being headbutted requires starting over from zero sats
 - **Persistent membership**: Once you're in the herd, you stay until headbutted out
 - **Lightning required**: You must have a working Lightning address to receive payouts
 - **Automated system**: Everything happens automatically via Nostr monitoring
