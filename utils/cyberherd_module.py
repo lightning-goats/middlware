@@ -223,23 +223,6 @@ class MetadataFetcher:
         # Fall back to DEFAULT_RELAYS
         return await self.lookup_metadata(pubkey, DEFAULT_RELAYS)
 
-    async def lookup_metadata_with_relays(self, pubkey: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
-        """
-        Lookup both metadata and relays for a user, trying their preferred relays first.
-        Returns (metadata, relays) tuple.
-        """
-        # First get their relay list
-        relays = await lookup_relay_list(pubkey)
-        
-        # Then try to get metadata using those relays
-        metadata = await self.lookup_metadata(pubkey, relays)
-        if metadata:
-            return metadata, relays
-            
-        # If that failed, try with default relays
-        metadata = await self.lookup_metadata(pubkey, DEFAULT_RELAYS)
-        return metadata, DEFAULT_RELAYS if metadata else []
-
 # Encapsulated nprofile Generation
 async def generate_nprofile(pubkey: str) -> Optional[str]:
     """
