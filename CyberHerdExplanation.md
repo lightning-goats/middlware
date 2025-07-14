@@ -90,7 +90,7 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 - **Minimum zap**: 10 sats required to attempt headbutting
 - **Amount reset**: When headbutted out, your accumulated amount is completely reset to zero
 - **Fresh start**: To rejoin after being headbutted, you start with zero sats and must build up again
-- **Cooldown period**: 1-second cooldown after each successful headbutt
+- **Cooldown period**: 5-second cooldown after each successful headbutt
 - **Public notifications**: Both parties receive public reply notifications about headbutts
 - **Fair play**: System prevents rapid-fire headbutting attempts
 
