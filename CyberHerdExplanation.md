@@ -76,9 +76,8 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 
 **Scenario 4 - Getting headbutted and rejoining:**
 - You're in the herd with 400 sats total
-- Someone headbutts you out with 450 sats → You lose your spot AND your previous zap amount is reset to zero
+- Someone headbutts you out with 450 sats → You lose your spot AND you're effectiely reset
 - To rejoin: You must start fresh with a new zap that exceeds the current lowest member
-- Your accumulated amount from before getting headbutted is completely reset
 
 ### Protection Strategy:
 - **Build your total**: Multiple zaps accumulate, making you harder to headbutt
@@ -89,7 +88,7 @@ When the CyberHerd reaches maximum capacity, new members can still join by "head
 ### Headbutting Rules:
 - **Minimum zap**: 10 sats required to attempt headbutting
 - **Amount reset**: When headbutted out, your accumulated amount is completely reset to zero
-- **Fresh start**: To rejoin after being headbutted, you start with zero sats and must build up again
+- **Fresh start**: To rejoin after being headbutted, you start over and must build up again
 - **Cooldown period**: 5-second cooldown after each successful headbutt
 - **Public notifications**: Both parties receive public reply notifications about headbutts
 - **Fair play**: System prevents rapid-fire headbutting attempts
