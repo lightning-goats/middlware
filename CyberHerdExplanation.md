@@ -8,7 +8,7 @@ The #CyberHerd is a community of Nostr users who collectively support the ⚡Lig
 
 The CyberHerd operates continuously with automatic monitoring of Nostr interactions:
 
-1. **Find the CyberHerd note**: Look for any note tagged with #CyberHerd from the Lightning Goats project
+1. **Find the CyberHerd note**: Look for today's note tagged with #CyberHerd from the Lightning Goats project
 2. **Zap the note**: Send a zap of 10+ sats to join the herd and earn payouts
 3. **Instant processing**: Your membership is processed immediately when detected
 4. **Notification**: You'll be notified via public reply when you join the herd
