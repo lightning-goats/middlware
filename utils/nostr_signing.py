@@ -4,6 +4,7 @@ import json
 import hashlib
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 from ecdsa.util import sigdecode_string, sigencode_string_canonize
+from urllib.parse import urlparse
 import logging
 from enum import IntEnum
 
@@ -34,13 +35,8 @@ class NostrKind(IntEnum):
 # NIP-01: Basic event structure
 REQUIRED_EVENT_FIELDS = {'id', 'pubkey', 'created_at', 'kind', 'tags', 'content', 'sig'}
 
-# NIP-57: Lightning Zaps with NIP-65 compliant relay format
-# Update DEFAULT_RELAYS to be a simple list since nak doesn't handle read/write preferences
-DEFAULT_RELAYS = [
-    "wss://relay.damus.io",
-    "wss://nos.lol",
-    "wss://relay.nostr.band"
-]
+# Import centralized relay configuration
+from .helpers import DEFAULT_RELAYS
 
 # NIP-65: Relay List Metadata
 VALID_RELAY_URL_SCHEMES = {'ws', 'wss'}
@@ -206,12 +202,19 @@ def build_zap_request(
     zapper_pubkey: str,
     zapped_pubkey: str,
     note_id: Optional[str] = None,
-    relays: Optional[List[str]] = None,  # Simple list for nak compatibility
+    relays: Optional[List[str]] = None,
     content: str = "",
-    lnurl_callback: Optional[str] = None
+    lnurl: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Build a NIP-57 compliant zap request event.
+    Per NIP-57, this event should contain:
+    - Required: p tag (recipient pubkey)
+    - Required: relays tag (flat list of relay URLs)
+    - Recommended: amount tag (in millisats)
+    - Recommended: lnurl tag (bech32 encoded lnurl)
+    - Optional: e tag (for zapping specific events)
+    - Optional: a tag (for addressable events)
     """
     if msat_amount <= 0:
         raise ValueError("Amount must be positive")
@@ -219,24 +222,25 @@ def build_zap_request(
     if not relays:
         relays = DEFAULT_RELAYS.copy()
     
+    # Required tags per NIP-57
     tags = [
-        ["p", zapped_pubkey],  # Recipient
-        ["amount", str(msat_amount)],
-        ["relays", *relays]  # Use relays directly as list
+        ["p", zapped_pubkey],  # Required: recipient pubkey
+        ["relays", *relays],   # Required: flat list of relays (NOT nested)
+        ["amount", str(msat_amount)]  # Recommended: amount in millisats
     ]
 
-    # Optional note reference
+    # Optional: LNURL tag (bech32 encoded)
+    if lnurl:
+        tags.append(["lnurl", lnurl])
+
+    # Optional: event reference for zapping specific events
     if note_id:
-        tags.append(["e", note_id, relays[0], "root"])
-    
-    # Optional LNURL callback
-    if lnurl_callback:
-        tags.append(["lnurl", lnurl_callback])
+        tags.append(["e", note_id])
 
     return {
         "kind": NostrKind.ZAP_REQUEST,
         "created_at": int(time.time()),
-        "content": content,
+        "content": content,  # Optional message to send with payment
         "tags": tags,
         "pubkey": zapper_pubkey
     }
@@ -278,13 +282,14 @@ async def sign_zap_event(
     private_key_hex: str,
     note_id: Optional[str] = None,
     relays: Optional[List[str]] = None,
-    content: str = ""
+    content: str = "",
+    lnurl: Optional[str] = None
 ) -> dict:
     """
     Creates and signs a NIP-57 Zap Request event.
     
     Validates the key pair and creates a properly signed zap request
-    that can be used in an LNURL-pay request.
+    that can be used in an LNURL-pay request per NIP-57 specification.
     """
     # Verify the key pair
     if not verify_key_pair(private_key_hex, zapper_pubkey):
@@ -298,7 +303,8 @@ async def sign_zap_event(
             zapped_pubkey=zapped_pubkey,
             note_id=note_id,
             relays=relays,
-            content=content
+            content=content,
+            lnurl=lnurl
         )
         
         # Sign the event
