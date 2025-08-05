@@ -1,156 +1,53 @@
 herd_profile = "nostr:nprofile1qqsxd84men85p8hqgearxes2az8azljn08nydeqa0s3klayk8u7rddshkxjm3"  #should be set in .env
 
 cyber_herd_dict = {
-    0: "🐐 {name} has joined the ⚡ CyberHerd ⚡! {thanks_part} {difference} sats until the feeding madness begins.\n\n https://lightning-goats.com\n\n",
-    1: "Welcome aboard, {name}! {thanks_part} The ⚡ CyberHerd ⚡ grows stronger. Just {difference} sats to snack time.\n\n https://lightning-goats.com\n\n",
-    2: "{name} steps into the digital pasture! {thanks_part} ⚡ CyberHerd ⚡ countdown: {difference} sats to feast.\n\n https://lightning-goats.com\n\n",
-    3: "Salute to {name} for joining today's ⚡ CyberHerd ⚡! {thanks_part} {difference} sats before goat treats deploy.\n\n https://lightning-goats.com\n\n",
-    4: "{name} is officially cybernetically herded! {thanks_part} {difference} more sats until chow time commences.\n\n https://lightning-goats.com\n\n",
-    5: "The herd welcomes {name} with bleating enthusiasm! {thanks_part} Snack activation in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    6: "{name} has been assimilated into the ⚡ CyberHerd ⚡! {thanks_part} {difference} sats until treats cascade from above.\n\n https://lightning-goats.com\n\n",
-    7: "Lightning fast, {name} joins the ⚡ CyberHerd ⚡! {thanks_part} Feeder activation countdown: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    8: "⚡ CyberHerd ⚡ gains a new ally: {name}! {thanks_part} So close! {difference} sats until goat gobbling.\n\n https://lightning-goats.com\n\n",
-    9: "{name}, you're now part of the electric flock! {thanks_part} Patience, young herder: {difference} sats remain.\n\n https://lightning-goats.com\n\n",
-    10: "{name} enters the cyber pasture! {thanks_part} {difference} sats standing between goats and grub.\n\n https://lightning-goats.com\n\n",
-    11: "Greetings, {name}! ⚡ CyberHerd ⚡ membership confirmed. {thanks_part} {difference} sats until munch time.\n\n https://lightning-goats.com\n\n",
-    12: "{name} has been inducted into the ⚡ CyberHerd ⚡! {thanks_part} The feast approaches in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    13: "Another soul joins the ⚡ CyberHerd ⚡! Welcome, {name}. {thanks_part} Clock's ticking: {difference} sats left.\n\n https://lightning-goats.com\n\n",
-    14: "The ⚡ CyberHerd ⚡ celebrates {name}'s arrival! {thanks_part} Feeding sequence initiates in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    15: "{name} has found their digital tribe! {thanks_part} ⚡ CyberHerd ⚡ feeding ETA: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    16: "{name} materializes in the ⚡ CyberHerd ⚡! {thanks_part} Block by block: {difference} sats to feeding.\n\n https://lightning-goats.com\n\n",
-    17: "The cyber gates open for {name}! {thanks_part} ⚡ CyberHerd ⚡ feeding horizon: {difference} sats away.\n\n https://lightning-goats.com\n\n",
-    18: "{name} is now cyber-synchronized! {thanks_part} ⚡ CyberHerd ⚡ feeder triggers in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    19: "Welcome to the matrix, {name}! {thanks_part} ⚡ CyberHerd ⚡ treat dispensation: {difference} sats pending.\n\n https://lightning-goats.com\n\n",
-    20: "⚡ CyberHerd ⚡ proudly presents new member {name}! {thanks_part} {difference} sats until treat protocol.\n\n https://lightning-goats.com\n\n",
-    21: "Like lightning, {name} strikes the ⚡ CyberHerd ⚡! {thanks_part} Energy builds: {difference} sats to release.\n\n https://lightning-goats.com\n\n",
-    22: "Strap in, {name}! ⚡ CyberHerd ⚡ protocols engaged. {thanks_part} {difference} sats to feeding chaos.\n\n https://lightning-goats.com\n\n",
-    23: "{name} becomes one with the ⚡ CyberHerd ⚡! {thanks_part} Snack deployment: {difference} sats remaining.\n\n https://lightning-goats.com\n\n",
-    24: "Today's ⚡ CyberHerd ⚡ gains {name}! {thanks_part} Treat precipitation forecast: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    25: "Massive welcome to {name}! {thanks_part} ⚡ CyberHerd ⚡ feast countdown: {difference} sats to go.\n\n https://lightning-goats.com\n\n",
-    26: "{name} joins the digital revolution! {thanks_part} ⚡ CyberHerd ⚡ fun factor: {difference} sats to maximum.\n\n https://lightning-goats.com\n\n",
-    27: "The ⚡ CyberHerd ⚡ collective embraces {name}! {thanks_part} Treat stream activation: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    28: "Initiating {name} into the ⚡ CyberHerd ⚡! {thanks_part} Final countdown commenced: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    29: "{name} achieves ⚡ CyberHerd ⚡ status! {thanks_part} Maintain course: {difference} sats to target.\n\n https://lightning-goats.com\n\n",
-    30: "{name} has penetrated the ⚡ CyberHerd ⚡ firewall! {thanks_part} {difference} sats before treat overflow.\n\n https://lightning-goats.com\n\n",
-    31: "{name} ascends to ⚡ CyberHerd ⚡ membership! {thanks_part} Snack time proximity: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    32: "Alert! {name} infiltrates the ⚡ CyberHerd ⚡! {thanks_part} Goat-treat barrier: {difference} sats thick.\n\n https://lightning-goats.com\n\n",
-    33: "Victory! {name} conquers ⚡ CyberHerd ⚡ entry! {thanks_part} {difference} sats separate us from glory.\n\n https://lightning-goats.com\n\n",
-    34: "⚡ CyberHerd ⚡ opens its digital arms to {name}! {thanks_part} Snack time proximity: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    35: "{name} uploads to the ⚡ CyberHerd ⚡! {thanks_part} Treat delivery pending: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    36: "Herd dynamics shift as {name} arrives! {thanks_part} ⚡ CyberHerd ⚡ celebration: {difference} sats away.\n\n https://lightning-goats.com\n\n",
-    37: "{name} synchronizes with ⚡ CyberHerd ⚡ frequency! {thanks_part} Feeding protocol: {difference} sats to execute.\n\n https://lightning-goats.com\n\n",
-    38: "The ⚡ CyberHerd ⚡ acknowledges {name}! {thanks_part} Treat gravitational pull: {difference} sats strong.\n\n https://lightning-goats.com\n\n",
-    39: "{name} breaches ⚡ CyberHerd ⚡ perimeter! {thanks_part} Hold position: {difference} sats to snack zone.\n\n https://lightning-goats.com\n\n",
-    40: "Transmission received: {name} joins ⚡ CyberHerd ⚡! {thanks_part} System ready: {difference} sats to execution.\n\n https://lightning-goats.com\n\n",
-    41: "{name} establishes ⚡ CyberHerd ⚡ connection! {thanks_part} Final approach: {difference} sats to destination.\n\n https://lightning-goats.com\n\n",
-    42: "{name} logs into the ⚡ CyberHerd ⚡ mainframe! {thanks_part} Snack subroutines load in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    43: "Daily recruitment successful: {name} joins ⚡ CyberHerd ⚡! {thanks_part} Snack time: {difference} sats pending.\n\n https://lightning-goats.com\n\n",
-    44: "Excitement protocols activate as {name} joins ⚡ CyberHerd ⚡! {thanks_part} Feast mode: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    45: "Initiating welcome sequence for {name}! {thanks_part} ⚡ CyberHerd ⚡ treat time: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    46: "{name} gains exclusive ⚡ CyberHerd ⚡ access! {thanks_part} Snack privileges: {difference} sats to activate.\n\n https://lightning-goats.com\n\n",
-    47: "{name} phases into the ⚡ CyberHerd ⚡ dimension! {thanks_part} Snack materialization: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    48: "Salutations to {name}! ⚡ CyberHerd ⚡ membership confirmed. {thanks_part} Goat munching: {difference} sats away.\n\n https://lightning-goats.com\n\n",
-    49: "Today's ⚡ CyberHerd ⚡ roster adds {name}! {thanks_part} Snack deployment window: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    50: "{name} decodes entry to ⚡ CyberHerd ⚡! {thanks_part} Feeding algorithm executes in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    51: "⚡ CyberHerd ⚡ network expands with {name}! {thanks_part} Treat dispensation countdown: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    52: "{name} achieves cyber-goat enlightenment! {thanks_part} ⚡ CyberHerd ⚡ nirvana: {difference} sats distant.\n\n https://lightning-goats.com\n\n",
-    53: "The Lightning Goats welcome {name} to ⚡ CyberHerd ⚡! {thanks_part} Next block mines in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    54: "{name} patches into ⚡ CyberHerd ⚡ consciousness! {thanks_part} Collective feeding: {difference} sats to sync.\n\n https://lightning-goats.com\n\n",
-    55: "Digital doors open for {name}! {thanks_part} ⚡ CyberHerd ⚡ treats load in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    56: "{name} interfaces with the ⚡ CyberHerd ⚡! {thanks_part} System treats compile in {difference} sats.\n\n https://lightning-goats.com\n\n",
-    57: "⚡ CyberHerd ⚡ protocols accept {name}! {thanks_part} Feeding cycle initiates: {difference} sats.\n\n https://lightning-goats.com\n\n",
-    58: "{name} links to the ⚡ CyberHerd ⚡ grid! {thanks_part} Power surge in {difference} sats: treats incoming.\n\n https://lightning-goats.com\n\n",
-    59: "Welcome signal transmitted to {name}! {thanks_part} ⚡ CyberHerd ⚡ feast protocols: {difference} sats.\n\n https://lightning-goats.com\n\n"
+    0: "{name} has joined the ⚡ CyberHerd ⚡. {thanks_part} The feeder will activate in {difference} sats.\n\n https://lightning-goats.com\n\n",
+    1: "Welcome, {name}. {thanks_part} The ⚡ CyberHerd ⚡ grows. {difference} sats are required for the next feeding cycle.\n\n https://lightning-goats.com\n\n",
+    2: "{name} has been added to the ⚡ CyberHerd ⚡. {thanks_part} The feeder activation countdown is at {difference} sats.\n\n https://lightning-goats.com\n\n",
+    3: "A warm welcome to {name} for joining the ⚡ CyberHerd ⚡. {thanks_part} {difference} sats until treat dispensation.\n\n https://lightning-goats.com\n\n",
+    4: "{name} is now a member of the ⚡ CyberHerd ⚡. {thanks_part} {difference} sats remaining until the feeder is triggered.\n\n https://lightning-goats.com\n\n",
+    5: "The herd welcomes {name}. {thanks_part} Feeder activation will occur in {difference} sats.\n\n https://lightning-goats.com\n\n",
+    6: "{name} has been successfully added to the ⚡ CyberHerd ⚡. {thanks_part} {difference} sats until treats are dispensed.\n\n https://lightning-goats.com\n\n",
+    7: "Welcome, {name}, to the ⚡ CyberHerd ⚡. {thanks_part} The feeder requires {difference} more sats to activate.\n\n https://lightning-goats.com\n\n",
+    8: "The ⚡ CyberHerd ⚡ has a new member: {name}. {thanks_part} {difference} sats until the next feeding event.\n\n https://lightning-goats.com\n\n",
+    9: "{name}, you are now officially part of the ⚡ CyberHerd ⚡. {thanks_part} Please note, {difference} sats remain for feeder activation.\n\n https://lightning-goats.com\n\n",
+    10: "{name} has entered the ⚡ CyberHerd ⚡. {thanks_part} {difference} sats are pending for the next feeding cycle.\n\n https://lightning-goats.com\n\n"
 }
+
 
 cyber_herd_info_dict = {
     0:"",
 }
 
 thank_you_variations = [
-    "Thanks for the lightning-fast zap of {new_amount} sats! ⚡",
-    "Electrifying! Your {new_amount} sat zap energizes the herd! 🔋",
-    "Zap received! {new_amount} sats of pure Bitcoin energy! 💥",
-    "Buzzing with gratitude for your {new_amount} sat lightning strike! ⚡",
-    "Supercharged! That {new_amount} sat zap powers up the goats! 🚀",
-    "Those {new_amount} sats just made our day—zap on! 🐐",
-    "Lightning love delivered! {new_amount} sats of appreciation! 💝",
-    "Sparks flying with your {new_amount} sat contribution! ✨",
-    "Your {new_amount} sat zap illuminates the Nostrverse! 💡",
-    "Thunder struck! {new_amount} sats of digital gold! ⛈️",
-    "Voltage surge! {new_amount} sats charged and ready! 🔋",
-    "Your zap creates ripples—{new_amount} sats of magic! 🌊",
-    "Sweet lightning strike! {new_amount} sats of pure joy! 🍯",
-    "Every sat sparks change—your {new_amount} ignites possibilities! 🔥",
-    "The goats bleat with joy for your {new_amount} sat zap! 🐐",
-    "Mission accomplished! {new_amount} sats successfully zapped! ✅",
-    "High-frequency gratitude for your {new_amount} sat transmission! 📡",
-    "Current status: charged with {new_amount} sats of awesomeness! ⚡",
-    "Your {new_amount} sat zap fuels the Bitcoin revolution! 🎯",
-    "Lightning network activated with {new_amount} sats of power! 🌐",
-    "Short circuit of happiness—{new_amount} sats received! 😊",
-    "Your {new_amount} sat bolt energizes our ecosystem! 🌿",
-    "Static electricity can't compare to your {new_amount} sat zap! ⚡",
-    "Frequency locked: {new_amount} sats of pure intention! 🎵",
-    "Your {new_amount} sat contribution magnetizes good vibes! 🧲",
-    "Waveform perfect! {new_amount} sats of harmonic resonance! 🎶",
-    "Circuit complete! {new_amount} sats flow through the network! 🔌",
-    "Amplified appreciation for your {new_amount} sat signal! 📻",
-    "Your {new_amount} sat zap generates sustainable energy! 🌱",
-    "Pulse detected: {new_amount} sats of life force! 💓"
+    "Thank you for the contribution of {new_amount} sats.",
+    "Your {new_amount} sat contribution has been received and supports the herd.",
+    "We have received your contribution of {new_amount} sats.",
+    "Thank you for your support. Your {new_amount} sat transaction is confirmed.",
+    "Your {new_amount} sat contribution is greatly appreciated.",
+    "The herd thanks you for your contribution of {new_amount} sats.",
+    "Your {new_amount} sat contribution to the project has been received.",
+    "We appreciate your support with a {new_amount} sat contribution.",
+    "Thank you. Your {new_amount} sats help power the Lightning Goats project.",
+    "Contribution of {new_amount} sats confirmed. Thank you for your support.",
+    "Your {new_amount} sats have been successfully contributed to the herd.",
+    "Thank you for participating in the Lightning Goats project with {new_amount} sats.",
+    "Your contribution of {new_amount} sats is valuable to our project.",
+    "Every sat counts. Thank you for the {new_amount} sats.",
+    "The Lightning Goats project is powered by contributions like your {new_amount} sats. Thank you."
 ]
 
 cyber_herd_treats_dict = {
-    0: "💰 {name} just scored {new_amount} sats from the ⚡ CyberHerd ⚡ treasure chest!\n\n https://lightning-goats.com\n\n",
-    1: "Lightning strikes! {new_amount} sats delivered to {name} via ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
-    2: "Wallet notification incoming, {name}! {new_amount} sats from the ⚡ CyberHerd ⚡ feeder dispensary.\n\n https://lightning-goats.com\n\n",
-    3: "Sweet digital treats for {name}! Savor {new_amount} sats courtesy of the ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
-    4: "{name}, your slice of the ⚡ CyberHerd ⚡ pie equals {new_amount} sats. Momentum building! 🚀\n\n https://lightning-goats.com\n\n",
-    5: "Deposit confirmed! {name}, {new_amount} sats materialized from the ⚡ CyberHerd ⚡ matrix.\n\n https://lightning-goats.com\n\n",
-    6: "Cyber grazing pays off, {name}! Your daily ⚡ CyberHerd ⚡ dividend: {new_amount} sats.\n\n https://lightning-goats.com\n\n",
-    7: "Achievement unlocked, {name}! {new_amount} sats earned through ⚡ CyberHerd ⚡ participation.\n\n https://lightning-goats.com\n\n",
-    8: "Stack growing, {name}! Your wallet absorbed {new_amount} sats. ⚡ CyberHerd ⚡ power! 💪\n\n https://lightning-goats.com\n\n",
-    9: "Digital dividend distributed! {name}, {new_amount} sats credited by the ⚡ CyberHerd ⚡ algorithm.\n\n https://lightning-goats.com\n\n",
-    10: "Excellent news, {name}! {new_amount} sats transmitted through ⚡ CyberHerd ⚡ channels.\n\n https://lightning-goats.com\n\n",
-    11: "Power boost incoming! {name}, {new_amount} sats energizing your wallet via ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
-    12: "Transaction complete! {new_amount} sats landed in {name}'s account. ⚡ CyberHerd ⚡ appreciation! 🙏\n\n https://lightning-goats.com\n\n",
-    13: "Fresh sats delivered! {name}, enjoy your {new_amount} sats from the ⚡ CyberHerd ⚡ network.\n\n https://lightning-goats.com\n\n",
-    14: "Reward protocol executed! {name}, {new_amount} sats added by ⚡ CyberHerd ⚡ systems.\n\n https://lightning-goats.com\n\n",
-    15: "Celebration time, {name}! {new_amount} sats now enhancing your wallet, ⚡ CyberHerd ⚡ style! 🎉\n\n https://lightning-goats.com\n\n",
-    16: "Mission success! {name}, you've harvested {new_amount} sats from the ⚡ CyberHerd ⚡ fields.\n\n https://lightning-goats.com\n\n",
-    17: "Your dedication rewards you, {name}! Receive {new_amount} sats from ⚡ CyberHerd ⚡ gratitude.\n\n https://lightning-goats.com\n\n",
-    18: "Balance updated! {name}, {new_amount} sats injected by the ⚡ CyberHerd ⚡ protocol.\n\n https://lightning-goats.com\n\n",
-    19: "Sats secured! {name}, you've claimed {new_amount} sats through ⚡ CyberHerd ⚡ membership. 🔒\n\n https://lightning-goats.com\n\n",
-    20: "Processing complete! {name}, {new_amount} sats successfully transmitted via ⚡ CyberHerd ⚡ network.\n\n https://lightning-goats.com\n\n",
-    21: "Victory achieved! {name}, {new_amount} sats deployed by the ⚡ CyberHerd ⚡ command center.\n\n https://lightning-goats.com\n\n",
-    22: "Wealth multiplied! {name}, you're {new_amount} sats richer via ⚡ CyberHerd ⚡ magic. ✨\n\n https://lightning-goats.com\n\n",
-    23: "Instant gratification! {name}, {new_amount} sats materialized by ⚡ CyberHerd ⚡ technology.\n\n https://lightning-goats.com\n\n",
-    24: "Treasure unlocked! {name}, discover your {new_amount} sats gift from ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
-    25: "Digital bounty received! {name}, {new_amount} sats harvested from the ⚡ CyberHerd ⚡ ecosystem.\n\n https://lightning-goats.com\n\n",
-    26: "Account enhanced! {name}, {new_amount} sats integrated by ⚡ CyberHerd ⚡ protocols.\n\n https://lightning-goats.com\n\n",
-    27: "Outstanding performance! {name}, {new_amount} sats awarded by ⚡ CyberHerd ⚡ recognition system.\n\n https://lightning-goats.com\n\n",
-    28: "Wealth generation active! {new_amount} sats distributed to {name}. ⚡ CyberHerd ⚡ solidarity! 🤝\n\n https://lightning-goats.com\n\n",
-    29: "Earning confirmed! {name}, {new_amount} sats accumulated through ⚡ CyberHerd ⚡ engagement.\n\n https://lightning-goats.com\n\n",
-    30: "Premium delivery! {name}, {new_amount} sats transferred by ⚡ CyberHerd ⚡ express service.\n\n https://lightning-goats.com\n\n",
-    31: "Success notification! {name}, {new_amount} sats confirmed.\n\n https://lightning-goats.com\n\n",
-    32: "Epic win! {name}, you've been blessed with {new_amount} sats. 🤘⚡ CyberHerd Elite!⚡🤘\n\n https://lightning-goats.com\n\n",
-    33: "Positive confirmation! {name}, {new_amount} sats allocated by ⚡ CyberHerd ⚡ intelligence.\n\n https://lightning-goats.com\n\n",
-    34: "Fresh earnings! {name}, savor your {new_amount} sats from ⚡ CyberHerd ⚡ generation.\n\n https://lightning-goats.com\n\n",
-    35: "Value transfer complete! {new_amount} sats routed to {name} through ⚡ CyberHerd ⚡ channels.\n\n https://lightning-goats.com\n\n",
-    36: "Reward claimed! {name}, {new_amount} sats acknowledged by ⚡ CyberHerd ⚡ appreciation protocol.\n\n https://lightning-goats.com\n\n",
-    37: "Portfolio boost! {name}, {new_amount} sats courtesy of the ⚡ Lightning Goats CyberHerd ⚡ empire.\n\n https://lightning-goats.com\n\n",
-    38: "Excellence recognized! {name}, {new_amount} sats attributed by ⚡ CyberHerd ⚡ merit system.\n\n https://lightning-goats.com\n\n",
-    39: "Asset increase! {name}, {new_amount} sats incorporated by ⚡ CyberHerd ⚡ wealth protocols.\n\n https://lightning-goats.com\n\n",
-    40: "Lightning speed delivery! {name}, {new_amount} sats zapped to your account via ⚡ CyberHerd ⚡! ⚡\n\n https://lightning-goats.com\n\n",
-    41: "Digital prosperity! {name}, {new_amount} sats cultivated in the ⚡ CyberHerd ⚡ ecosystem. 🌱\n\n https://lightning-goats.com\n\n",
-    42: "Network effect activated! {name}, {new_amount} sats propagated through ⚡ CyberHerd ⚡ nodes.\n\n https://lightning-goats.com\n\n",
-    43: "Smart contract executed! {name}, {new_amount} sats released by ⚡ CyberHerd ⚡ automation.\n\n https://lightning-goats.com\n\n",
-    44: "Decentralized dividend! {name}, {new_amount} sats distributed via ⚡ CyberHerd ⚡ consensus.\n\n https://lightning-goats.com\n\n",
-    45: "Zap confirmed! {name}, {new_amount} sats validated by ⚡ CyberHerd ⚡ cryptography.\n\n https://lightning-goats.com\n\n",
-    46: "Mining reward! {name}, {new_amount} sats extracted from the ⚡ CyberHerd ⚡ digital mine. ⛏️\n\n https://lightning-goats.com\n\n",
-    47: "Proof of participation! {name}, {new_amount} sats earned through ⚡ CyberHerd ⚡ contribution.\n\n https://lightning-goats.com\n\n",
-    48: "Hash rate bonus! {name}, {new_amount} sats computed by ⚡ CyberHerd ⚡ algorithms.\n\n https://lightning-goats.com\n\n",
-    49: "Cryptographic gift! {name}, {new_amount} sats encrypted and delivered by ⚡ CyberHerd ⚡ security.\n\n https://lightning-goats.com\n\n"
+    0: "{name} has received a reward of {new_amount} sats from the ⚡ CyberHerd ⚡ distribution.\n\n https://lightning-goats.com\n\n",
+    1: "A distribution of {new_amount} sats has been sent to {name} as part of their ⚡ CyberHerd ⚡ membership.\n\n https://lightning-goats.com\n\n",
+    2: "Transaction notice: {name} has been credited with {new_amount} sats from the ⚡ CyberHerd ⚡ reward protocol.\n\n https://lightning-goats.com\n\n",
+    3: "{name} has received a {new_amount} sat distribution, courtesy of the ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
+    4: "As a member of the ⚡ CyberHerd ⚡, {name} has been allocated {new_amount} sats.\n\n https://lightning-goats.com\n\n",
+    5: "Deposit confirmed: {new_amount} sats have been transferred to {name} from the ⚡ CyberHerd ⚡ system.\n\n https://lightning-goats.com\n\n",
+    6: "Your daily ⚡ CyberHerd ⚡ reward has been processed: {name} receives {new_amount} sats.\n\n https://lightning-goats.com\n\n",
+    7: "Reward unlocked: {name} has earned {new_amount} sats through ⚡ CyberHerd ⚡ participation.\n\n https://lightning-goats.com\n\n",
+    8: "Your wallet balance has increased, {name}. {new_amount} sats received from the ⚡ CyberHerd ⚡.\n\n https://lightning-goats.com\n\n",
+    9: "The daily dividend has been distributed: {name} is credited with {new_amount} sats via the ⚡ CyberHerd ⚡ algorithm.\n\n https://lightning-goats.com\n\n"
 }
 
 
@@ -160,7 +57,7 @@ interface_info_dict = {
     2: "Support the herd on Nostr! Nostr users can send treats to the goats by zapping ⚡ Lightning Goats ⚡ notes. Zaps contribute to triggering the feeder and dispense cool goat facts.",
     3: "Each goat has his own Lightning address. Sats sent to the goats on Nostr are forwarded to the herd and contribute to triggering the feeder.",
     4: "Watch the goats live and participate in feeding them by sending sats via the Lightning Network. The more sats, the closer the feeder gets to being triggered, giving the goats a tasty treat.",
-    5: "⚡ CyberHerd ⚡ functionality is here to reward Nostr users who interact with the herd. Zap or repost notes tagged with #CyberHerd to grab one of the available spots for the day, and when the herd gets treats, so will you.",
+    5: "⚡ CyberHerd ⚡ functionality is here to reward Nostr users who interact with the herd. Zap TODAY'S #CyberHerd note with 10+ sats to grab one of the 3 available spots for the day. When the herd gets treats, so will you - receiving 10% of feeder payments!",
     6: "Be sure to like and subscribe to our channel on YouTube. The goats enjoy their jobs and like helping to educate people about Bitcoin and Lightning.",
     7: "⚡ Lightning Goats ⚡ runs on 100% open-source software, and is powered by solar energy. We're online during daylight hours as soon as our batteries are charged enough to broadcast.",
     8: "With a few seconds of video broadcast lag, you can interact with the goats in real-time using the Lightning Network. By sending sats, viewers can trigger the feeder, creating an interactive experience that bridges the digital and natural worlds.",
@@ -195,7 +92,29 @@ interface_info_dict = {
     37: "Sending sats to the ⚡ Lightning Goats ⚡ is a fun and interactive way to experience the Bitcoin Lightning Network. Your contribution directly impacts the feeder and helps the goats get their next meal.",
     38: "By contributing sats to the ⚡ Lightning Goats ⚡, you’re supporting not only the herd but also education about Bitcoin, Lightning, and renewable energy solutions.",
     39: "Each sat you send helps feed the ⚡ Lightning Goats ⚡ and keeps the project running. Your contributions also fund hardware and development for this unique, open-source experiment.",
-    40: "Support the ⚡ Lightning Goats ⚡ by sending sats! Whether you zap a note or use a Lightning wallet, your contribution brings the herd closer to their next feeding time."
+    40: "Support the ⚡ Lightning Goats ⚡ by sending sats! Whether you zap a note or use a Lightning wallet, your contribution brings the herd closer to their next feeding time.",
+    41: "The #CyberHerd is a community of supporters who receive a share of payments each time the goat feeder is triggered. Join by zapping TODAY'S #CyberHerd note with 10+ sats. The herd resets daily at midnight UTC.",
+    42: "To join the #CyberHerd, you need a valid NIP-05 identifier and a working Lightning address. Membership requires a zap of at least 10 sats to TODAY'S #CyberHerd note only - older notes don't work due to daily reset.",
+    43: "When the feeder is activated, 10% of the trigger amount is distributed among all #CyberHerd members. Payouts are proportional to each member's total zap contribution.",
+    44: "Your zaps to Lightning Goats content are cumulative. New members must zap TODAY'S #CyberHerd note to join, but existing members can zap ANY Lightning Goats note to increase their payout share.",
+    45: "When the #CyberHerd is at its maximum capacity of 3 members, you can still join by 'headbutting' out the member with the lowest contribution.",
+    46: "To displace a member via 'headbutting,' new members must zap TODAY'S #CyberHerd note with more sats than the lowest member's total. Upon a successful headbutt, you take their spot in the herd.",
+    47: "Please be aware: If you are displaced from the herd via 'headbutting,' your accumulated zap total is reset to zero. You must start over to rejoin.",
+    48: "To increase your security within the #CyberHerd, existing members can zap ANY Lightning Goats note to add to their total. A higher contribution makes it more difficult for another user to displace you via headbutting.",
+    49: "All #CyberHerd operations, including membership, payouts, and displacements, are processed automatically by monitoring Nostr. Notifications are sent as public replies.",
+    50: "The #CyberHerd resets every night at midnight UTC. All memberships and accumulated zap amounts are cleared, giving everyone a fresh start each day with a new #CyberHerd note.",
+    51: "When the feeder triggers (around 850 sats), payments are split: 90% feeds the goats, 10% goes to CyberHerd members. Your share depends on your total zap contribution relative to other members.",
+    52: "New to #CyberHerd? You must zap TODAY'S #CyberHerd tagged note to join. Already a member? You can zap ANY Lightning Goats note to increase your payout share and headbutt protection.",
+    53: "Important: Only zaps of 10+ sats to Lightning Goats authored content count for #CyberHerd membership and payouts. Zaps to other people's notes don't qualify.",
+    54: "Getting headbutted out of the #CyberHerd completely resets your accumulated zap total to zero. To rejoin, you must start fresh by zapping TODAY'S #CyberHerd note again.",
+    55: "The #CyberHerd has a maximum of 3 members. When full, new members can still join by 'headbutting' - zapping more than the lowest member's total contribution to TODAY'S #CyberHerd note.",
+    56: "CyberHerd payouts are proportional to your contribution. If you've zapped 500 sats and others zapped 300 and 200, you get the biggest share of the 10% CyberHerd distribution when the feeder triggers.",
+    57: "Daily reset means fresh opportunities! Every day at midnight UTC, the #CyberHerd clears and a new #CyberHerd note is posted. Previous day's notes become invalid for joining.",
+    58: "CyberHerd strategy tip: Build up your zap total by supporting various Lightning Goats content. More zaps = bigger payouts and better protection against headbutting attacks.",
+    59: "Example #CyberHerd scenario: You zap 200 sats to TODAY'S #CyberHerd note to join, then 300 sats to a Lightning Goats educational post. Your total: 500 sats = bigger future payouts!",
+    60: "Flexible zapping for existing #CyberHerd members: Support any Lightning Goats content - technical posts, goat updates, educational content. Every qualifying zap increases your payout share.",
+    61: "#CyberHerd membership requires a valid NIP-05 identifier and working Lightning address. These are essential for receiving your automatic payouts when the feeder triggers.",
+    62: "The #CyberHerd operates 24/7 with automatic monitoring. Your membership and contributions are updated immediately when the system detects qualifying zaps to Lightning Goats content."
 }
 
 sats_received_dict = {
@@ -273,7 +192,7 @@ sats_received_dict = {
     71: "Thanks for the {new_amount} sats! {difference_message} Goats such as {goat_name} aid in creating sustainable food systems through natural grazing.\n\n https://lightning-goats.com\n\n",
     72: "{new_amount} sats received! {difference_message} Goats, including {goat_name}, play a vital role in providing natural fertilization and land management.\n\n https://lightning-goats.com\n\n",
     73: "We appreciate your {new_amount} sats! {difference_message} Goats like {goat_name} help maintain ecological balance.\n\n https://lightning-goats.com\n\n",
-    74: "Your donation of {new_amount} sats strengthens the Bitcoin Standard! {difference_message} In permaculture settings, goats, such as {goat_name}, are used for their ability to control invasive species and enhance biodiversity.\n\n https://lightning-goats.com\n\n",
+    74: "Your donation of {new_amount} sats strengthens the Bitcoin Standard! {difference_message} In permaculture settings, such as {goat_name}, are used for their ability to control invasive species and enhance biodiversity.\n\n https://lightning-goats.com\n\n",
     75: "Grateful for your {new_amount} sats! {difference_message} Goats like {goat_name} are effective in permaculture systems, aiding in composting and soil improvement.\n\n https://lightning-goats.com\n\n",
     76: "Your generous {new_amount} sats aid farm growth! {difference_message} Goats, such as {goat_name}, enhance permaculture gardens by providing organic weed control.\n\n https://lightning-goats.com\n\n",
     77: "Thanks for the {new_amount} sats towards sustainable practices! {difference_message} Goats like {goat_name} are valued for their role in integrated pest management.\n\n https://lightning-goats.com\n\n",
@@ -352,70 +271,19 @@ sats_received_dict = {
 }
 
 headbutt_info_dict = {
-    0: "The ⚡ CyberHerd ⚡ is full! Let the headbutting begin! 💥 Send {required_sats} sats to headbutt {victim_name} out of the herd!\n\n https://lightning-goats.com\n\n",
-    1: "Herd at capacity! 🔥 Time for some digital headbutting! Need {required_sats} sats to knock {victim_name} out!!\n\n https://lightning-goats.com\n\n",
-    2: "The ⚡ CyberHerd ⚡ is packed! 💪 Ready to rumble? {required_sats} sats will send {victim_name} packing!\n\n https://lightning-goats.com\n\n",
-    3: "Herd is full to the brim! ⚡ Headbutting mode activated! ⚡ Just {required_sats} sats to boot {victim_name}!\n\n https://lightning-goats.com\n\n",
-    4: "No more room in the ⚡ CyberHerd ⚡! Time to throw down! 🥊 {required_sats} sats will headbutt {victim_name} into the digital void!\n\n https://lightning-goats.com\n\n",
-    5: "The herd is maxed out! 💥 Battle royale time! Send {required_sats} sats to claim {victim_name}'s spot!\n\n https://lightning-goats.com\n\n",
-    6: "⚡ CyberHerd ⚡ overflow detected! 🔋 Power up with {required_sats} sats to headbutt {victim_name} out of the way!\n\n https://lightning-goats.com\n\n",
-    7: "Herd capacity reached! ⚡ Time for some electric headbutting! ⚡ {required_sats} sats will knock {victim_name} out the herd!\n\n https://lightning-goats.com\n\n",
-    8: "The ⚡ CyberHerd ⚡ is bursting! 💀 Survival of the fastest! {required_sats} sats to eliminate {victim_name}!\n\n https://lightning-goats.com\n\n",
-    9: "Full house in the ⚡ CyberHerd ⚡! 🎯 Target acquired: {victim_name}! Cost to headbutt: {required_sats} sats!\n\n https://lightning-goats.com\n\n",
-    10: "Herd at maximum! ⚡ Digital combat engaged! ⚡ {required_sats} sats will send {victim_name} flying!\n\n https://lightning-goats.com\n\n",
-    11: "The ⚡ CyberHerd ⚡ is complete! 🔥 Time to shake things up! {required_sats} sats to headbutt {victim_name} away from the feeder!\n\n https://lightning-goats.com\n\n",
-    12: "No vacancy in the ⚡ CyberHerd ⚡! 💪 Challenge mode: {required_sats} sats to knock {victim_name} down a peg!\n\n https://lightning-goats.com\n\n",
-    13: "Herd overflow! ⚡ Lightning strikes twice! ⚡ {required_sats} sats will electrify {victim_name} right out of here!\n\n https://lightning-goats.com\n\n",
-    14: "The ⚡ CyberHerd ⚡ is packed tight! 🎪 Step right up! {required_sats} sats for a chance to headbutt {victim_name}!\n\n https://lightning-goats.com\n\n",
-    15: "Maximum capacity reached! 🚀 Blast off {victim_name} with {required_sats} sats of pure headbutting power!\n\n https://lightning-goats.com\n\n",
-    16: "The ⚡ CyberHerd ⚡ is at the limit! ⚔️ Battle stations! {required_sats} sats to defeat {victim_name}!\n\n https://lightning-goats.com\n\n",
-    17: "Herd is stuffed! 🎯 Headbutting tournament begins now! {required_sats} sats to take down {victim_name}!\n\n https://lightning-goats.com\n\n",
-    18: "Full to capacity! ⚡ Time for some cyber carnage! ⚡ {required_sats} sats will headbutt {victim_name} into oblivion!\n\n https://lightning-goats.com\n\n",
-    19: "The ⚡ CyberHerd ⚡ can't take anymore! 💥 Demolition time! {required_sats} sats to demolish {victim_name}'s position!\n\n https://lightning-goats.com\n\n",
-    20: "Critical mass achieved! ⚡ CyberHerd ⚡ ejection protocol active! {required_sats} sats to launch {victim_name} into orbit! 🚀\n\n https://lightning-goats.com\n\n",
-    21: "Alert! Herd saturation detected! 🚨 Initiate headbutt sequence with {required_sats} sats to displace {victim_name}!\n\n https://lightning-goats.com\n\n",
-    22: "⚡ CyberHerd ⚡ at 100% capacity! 📊 Execute removal protocol: {required_sats} sats to evict {victim_name}!\n\n https://lightning-goats.com\n\n",
-    23: "Herd network congestion! 🌐 Traffic control initiated! {required_sats} sats to reroute {victim_name} out of the system!\n\n https://lightning-goats.com\n\n",
-    24: "Digital pasture overflow! 🌾 Range management required! {required_sats} sats to relocate {victim_name}!\n\n https://lightning-goats.com\n\n",
-    25: "⚡ CyberHerd ⚡ buffer exceeded! 💾 Memory flush needed! {required_sats} sats to delete {victim_name} from cache!\n\n https://lightning-goats.com\n\n",
-    26: "Competition mode activated! 🏆 Last goat standing! {required_sats} sats to challenge {victim_name} for dominance!\n\n https://lightning-goats.com\n\n",
-    27: "Herd equilibrium disturbed! ⚖️ Rebalancing required! {required_sats} sats to restore order by removing {victim_name}!\n\n https://lightning-goats.com\n\n",
-    28: "⚡ CyberHerd ⚡ pressure valve engaged! 🔧 Release tension with {required_sats} sats to expel {victim_name}!\n\n https://lightning-goats.com\n\n",
-    29: "Matrix overflow detected! 🕶️ System restart imminent! {required_sats} sats to disconnect {victim_name} from the grid!\n\n https://lightning-goats.com\n\n",
-    30: "Bandwidth limitation reached! 📡 Connection throttling active! {required_sats} sats to terminate {victim_name}'s session!\n\n https://lightning-goats.com\n\n",
-    31: "⚡ CyberHerd ⚡ queue is full! 📋 Priority processing needed! {required_sats} sats to bump {victim_name} from the line!\n\n https://lightning-goats.com\n\n",
-    32: "Satoshi showdown initiated! ₿ Lightning duel commencing! {required_sats} sats to blast {victim_name} out of existence!\n\n https://lightning-goats.com\n\n",
-    33: "Herd density critical! 🔬 Molecular displacement required! {required_sats} sats to phase {victim_name} into another dimension!\n\n https://lightning-goats.com\n\n",
-    34: "⚡ CyberHerd ⚡ firewall breach! 🔥 Security protocol engaged! {required_sats} sats to quarantine {victim_name}!\n\n https://lightning-goats.com\n\n",
-    35: "Goat Grid overload! ⚡ Power redistribution needed! {required_sats} sats to reroute {victim_name} to backup server!\n\n https://lightning-goats.com\n\n",
-    36: "Peak performance threshold! 📈 Optimization required! {required_sats} sats to streamline by removing {victim_name}!\n\n https://lightning-goats.com\n\n",
-    37: "⚡ CyberHerd ⚡ stack overflow! 💻 Exception handling activated! {required_sats} sats to catch and release {victim_name}!\n\n https://lightning-goats.com\n\n",
-    38: "Chow prioritization needed! {required_sats} sats to fast-track {victim_name}'s exit!\n\n https://lightning-goats.com\n\n",
-    39: "Neural network saturation! 🧠 Synapse pruning required! {required_sats} sats to disconnect {victim_name} from the collective!\n\n https://lightning-goats.com\n\n"
+    0: "⚡headbutt⚡: The ⚡ CyberHerd ⚡ is currently at full capacity. To join, a contribution of {required_sats} sats is needed to displace the member with the lowest contribution, {victim_name}.\n\n https://lightning-goats.com\n\n",
+    1: "⚡headbutt⚡: The ⚡ CyberHerd ⚡ is at capacity. A contribution greater than {required_sats} sats will grant you {victim_name}'s position.\n\n https://lightning-goats.com\n\n",
+    2: "⚡headbutt⚡: The ⚡ CyberHerd ⚡ is full. To become a member, you must contribute more than the lowest member's amount of {required_sats} sats, currently held by {victim_name}.\n\n https://lightning-goats.com\n\n",
+    3: "⚡headbutt⚡: Membership in the ⚡ CyberHerd ⚡ is currently full. You can gain a spot by contributing at least {required_sats} sats, which will displace {victim_name}.\n\n https://lightning-goats.com\n\n",
+    4: "⚡headbutt⚡: There are no available spots in the ⚡ CyberHerd ⚡. A contribution of {required_sats} sats or more is required to take the place of {victim_name}.\n\n https://lightning-goats.com\n\n"
 }
 
 headbutt_success_dict = {
-    0: "🐐💥 HEADBUTT SUCCESSFUL! {attacker_name} ({attacker_amount} sats) has charged into the ⚡ CyberHerd ⚡, knocking out {victim_name} ({victim_amount} sats)! The herd has a new champion! 🏆\n\n https://lightning-goats.com\n\n",
-    1: "⚡ LIGHTNING HEADBUTT! ⚡ {attacker_name} ({attacker_amount} sats) has defeated {victim_name} ({victim_amount} sats) in digital combat! Welcome to the ⚡ CyberHerd ⚡! 💪\n\n https://lightning-goats.com\n\n",
-    2: "🥊 KNOCKOUT! {attacker_name} delivered {attacker_amount} sats of pure headbutting power and sent {victim_name} ({victim_amount} sats) flying! The ⚡ CyberHerd ⚡ has a new member! 🚀\n\n https://lightning-goats.com\n\n",
-    3: "💥 CYBER CARNAGE! {attacker_name} ({attacker_amount} sats) has successfully headbutted {victim_name} ({victim_amount} sats) out of the ⚡ CyberHerd ⚡! Digital dominance achieved! 👑\n\n https://lightning-goats.com\n\n",
-    4: "🔥 EPIC HEADBUTT! {attacker_name} blasted {attacker_amount} sats and obliterated {victim_name} ({victim_amount} sats) from the herd! Victory is yours! ⚡\n\n https://lightning-goats.com\n\n",
-    5: "⚡ THUNDER STRIKE! ⚡ {attacker_name} ({attacker_amount} sats) has conquered the ⚡ CyberHerd ⚡ by defeating {victim_name} ({victim_amount} sats)! The goats bow to their new leader! 🐐\n\n https://lightning-goats.com\n\n",
-    6: "🎯 PRECISION HEADBUTT! {attacker_name} targeted {victim_name} with {attacker_amount} sats and claimed victory! The ⚡ CyberHerd ⚡ has been conquered! 🎪\n\n https://lightning-goats.com\n\n",
-    7: "💪 GOAT POWER SURGE! {attacker_name} channeled {attacker_amount} sats of raw energy and demolished {victim_name} ({victim_amount} sats)! New herd leader confirmed! ⚡\n\n https://lightning-goats.com\n\n",
-    8: "🚀 DIGITAL DESTROYER! {attacker_name} launched {attacker_amount} sats and sent {victim_name} into orbit! The ⚡ CyberHerd ⚡ throne is yours! 👑\n\n https://lightning-goats.com\n\n"
-}
-
-headbutt_failure_dict = {
-    0: "🐐💢 HEADBUTT FAILED! {attacker_name}, your {attacker_amount} sats aren't enough! You need at least {required_amount} sats to challenge the ⚡ CyberHerd ⚡! The goats are tougher than they look! 💪\n\n https://lightning-goats.com\n\n",
-    1: "⚡ INSUFFICIENT POWER! ⚡ {attacker_name}, your {attacker_amount} sats can't penetrate the herd's defenses! Minimum {required_amount} sats required for headbutting! Charge up and try again! 🔋\n\n https://lightning-goats.com\n\n",
-    2: "🥊 BLOCKED! {attacker_name} attempted a headbutt with {attacker_amount} sats, but the ⚡ CyberHerd ⚡ deflected it! Need {required_amount} sats to break through! 🛡️\n\n https://lightning-goats.com\n\n",
-    3: "💥 HEADBUTT DENIED! {attacker_name}, your {attacker_amount} sats aren't sufficient! The ⚡ CyberHerd ⚡ requires {required_amount} sats minimum for entry! Power up and return! ⚡\n\n https://lightning-goats.com\n\n",
-    4: "🔥 RESISTANCE IS STRONG! {attacker_name} tried to headbutt with {attacker_amount} sats but failed! The herd demands {required_amount} sats to yield! Try harder! 💪\n\n https://lightning-goats.com\n\n",
-    5: "⚡ FORCE FIELD ACTIVE! ⚡ {attacker_name}, your {attacker_amount} sats bounced off the ⚡ CyberHerd ⚡! Need {required_amount} sats to penetrate! The goats laugh at your attempt! 😂\n\n https://lightning-goats.com\n\n",
-    6: "🛡️ SHIELDS UP! {attacker_name}, the ⚡ CyberHerd ⚡ has repelled your {attacker_amount} sat attack! Minimum {required_amount} sats required to breach the fortress! 🏰\n\n https://lightning-goats.com\n\n",
-    7: "🔒 ACCESS DENIED! {attacker_name}, your {attacker_amount} sats lack the punch! The ⚡ CyberHerd ⚡ gatekeepers demand {required_amount} sats! Come back stronger! 💪\n\n https://lightning-goats.com\n\n",
-    8: "⚔️ BATTLE LOST! {attacker_name} wielded {attacker_amount} sats but the ⚡ CyberHerd ⚡ stood firm! You need {required_amount} sats to claim victory! Retreat and regroup! 🏃‍♂️\n\n https://lightning-goats.com\n\n"
+    0: "⚡headbutt⚡: A new member has joined the ⚡ CyberHerd ⚡. {attacker_name} ({attacker_amount} sats) has displaced {victim_name} ({victim_amount} sats).\n\n https://lightning-goats.com\n\n",
+    1: "⚡headbutt⚡: The ⚡ CyberHerd ⚡ roster has been updated. {attacker_name} ({attacker_amount} sats) has taken the position previously held by {victim_name} ({victim_amount} sats).\n\n https://lightning-goats.com\n\n",
+    2: "⚡headbutt⚡: Membership change: {attacker_name} has entered the ⚡ CyberHerd ⚡ with a contribution of {attacker_amount} sats, displacing {victim_name} ({victim_amount} sats).\n\n https://lightning-goats.com\n\n",
+    3: "⚡headbutt⚡: A position in the ⚡ CyberHerd ⚡ has been filled by {attacker_name} ({attacker_amount} sats). The previous member, {victim_name} ({victim_amount} sats), has been removed.\n\n https://lightning-goats.com\n\n",
+    4: "⚡headbutt⚡: Update: {attacker_name} is now a member of the ⚡ CyberHerd ⚡ with a {attacker_amount} sat contribution, replacing {victim_name} ({victim_amount} sats).\n\n https://lightning-goats.com\n\n"
 }
 
 feeder_trigger_dict = {
@@ -522,64 +390,148 @@ feeder_trigger_dict = {
 }
 
 variations = {
-    0: "{difference} sats left until the lightning strikes and treats fall!",
-    1: "{difference} sats until snack time commences.",
-    2: "Only {difference} sats remaining before the feeding frenzy begins.",
-    3: "{difference} sats before the goats get their well-deserved rewards.",
-    4: "Just {difference} more sats until everyone chows down.",
-    5: "Snack activation sequence in {difference} sats.",
-    6: "Countdown active: {difference} sats until treats cascade from above.",
-    7: "Prepare for feeder trigger in {difference} sats.",
-    8: "Almost there! {difference} sats until the goats devour their feast.",
-    9: "Patience required: {difference} more sats to go.",
-    10: "{difference} sats standing between goats and grub time.",
-    11: "Hold tight, {difference} sats until munch time.",
-    12: "Approaching target: {difference} sats to feeding protocol.",
-    13: "The countdown continues: {difference} sats to launch.",
-    14: "T-minus {difference} sats until mealtime commences.",
-    15: "Feeding time approaching in {difference} sats.",
-    16: "Mark the blockchain: {difference} sats left for feeding.",
-    17: "On the digital horizon: {difference} sats to feast.",
-    18: "System alert: {difference} sats until feeder activation.",
-    19: "The moment approaches: {difference} sats until goat nirvana.",
-    20: "Just {difference} sats separate the herd from their banquet.",
-    21: "{difference} sats and the munching mayhem begins.",
-    22: "{difference} sats until the feast of champions.",
-    23: "Only {difference} sats before snack time erupts.",
-    24: "{difference} sats before the goats receive their digital dividends.",
-    25: "The herd awaits: {difference} sats until delicious delivery.",
-    26: "With {difference} sats remaining, snack time draws near.",
-    27: "{difference} sats remaining before goat gratification.",
-    28: "Not much longer! {difference} sats until treat time.",
-    29: "Snack attack imminent in {difference} sats! 🚀",
-    30: "{difference} sats and the goats enter food paradise.",
-    31: "Just {difference} sats before the chomping championship.",
-    32: "Snack countdown engaged: {difference} sats to detonation.",
-    33: "With {difference} sats left, hunger grows stronger!",
-    34: "Only {difference} sats before the goats celebrate victory.",
-    35: "Clock ticking! {difference} sats until treat deployment.",
-    36: "{difference} sats before the goats get their energy surge.",
-    37: "The herd grows restless! {difference} sats remaining.",
-    38: "Ready, set, snack! {difference} sats to launch sequence.",
-    39: "Only {difference} sats before the goats' dinner bell rings.",
-    40: "Just {difference} sats stand between anticipation and satisfaction.",
-    41: "Treat time materializes in {difference} sats.",
-    42: "The grand feast awaits {difference} sats away!",
-    43: "Goats preparing for snacks in {difference} sats.",
-    44: "Snack festival approaching in {difference} sats.",
-    45: "Just {difference} sats until the goats can finally dig in.",
-    46: "T-minus {difference} sats until the goats' snack revolution.",
-    47: "Only {difference} sats left until feeding protocol executes.",
-    48: "Almost snack time! {difference} sats to initialization.",
-    49: "The goats are {difference} sats away from munching bliss.",
-    50: "{difference} sats until the treats rain down from the cyber heavens.",
-    51: "Digital countdown: {difference} sats to goat happiness.",
-    52: "System ready! {difference} sats until treat dispensation.",
-    53: "Final approach: {difference} sats to feeding destination.",
-    54: "Goat anticipation building: {difference} sats to relief.",
-    55: "Lightning speed countdown: {difference} sats to snack zone.",
-    56: "Energy charging: {difference} sats until treat explosion.",
-    57: "Network synchronizing: {difference} sats to feeding sync.",
-    58: "Herd confirming... {difference} sats to treat validation.",
-    59: "Protocol executing: {difference} sats to snack deployment."
+    0: "{difference} sats are required for feeder activation.",
+    1: "The next feeding cycle will begin in {difference} sats.",
+    2: "Awaiting a remaining {difference} sats to trigger the feeder.",
+    3: "{difference} sats needed before the goats receive their treats.",
+    4: "The feeder is {difference} sats away from activation.",
+    5: "The feeding protocol will initiate after {difference} more sats.",
+    6: "The system requires an additional {difference} sats to dispense treats.",
+    7: "The feeder activation is pending {difference} more sats.",
+    8: "{difference} sats remaining until the next scheduled feeding.",
+    9: "Please note: {difference} more sats are needed for the next feeding.",
+    10: "The feeder will dispense treats once {difference} more sats are contributed."
+}
+
+headbutt_failure_dict = {
+    0: "⚡headbutt⚡: Contribution unsuccessful. {attacker_name}'s contribution of {attacker_amount} sats was not sufficient to join the ⚡ CyberHerd ⚡. A minimum of {required_amount} sats is required.\n\n https://lightning-goats.com\n\n",
+    1: "⚡headbutt⚡: Your contribution of {attacker_amount} sats is less than the {required_amount} sats required to displace the lowest member of the ⚡ CyberHerd ⚡. Please try again with a larger amount.\n\n https://lightning-goats.com\n\n",
+    2: "⚡headbutt⚡: The attempt by {attacker_name} to join the ⚡ CyberHerd ⚡ was unsuccessful. The contribution of {attacker_amount} sats did not meet the required {required_amount} sats.\n\n https://lightning-goats.com\n\n",
+    3: "⚡headbutt⚡: Entry to the ⚡ CyberHerd ⚡ denied. Your {attacker_amount} sat contribution is below the current minimum of {required_amount} sats to join.\n\n https://lightning-goats.com\n\n",
+    4: "⚡headbutt⚡: The submitted amount of {attacker_amount} sats from {attacker_name} is insufficient. To join the full herd, a contribution of {required_amount} sats or more is necessary.\n\n https://lightning-goats.com\n\n"
+}
+
+member_increase_dict = {
+    0: "⚡CyberHerd⚡: {member_name} has increased their contribution by {increase_amount} sats, bringing their total to {new_total}. Biological fact: Goats are ruminants with a four-chambered stomach, allowing them to efficiently digest fibrous plants.\n\n https://lightning-goats.com\n\n",
+    1: "⚡CyberHerd⚡: With an additional {increase_amount} sats, {member_name}'s new total is {new_total}. Did you know? The rectangular pupils of a goat provide a wide, 320-340 degree field of vision, aiding in predator detection.\n\n https://lightning-goats.com\n\n",
+    2: "⚡CyberHerd⚡: {member_name} adds {increase_amount} sats, for a total of {new_total}. Historical fact: Goats were among the first animals to be domesticated by humans, approximately 10,000 years ago.\n\n https://lightning-goats.com\n\n",
+    3: "⚡CyberHerd⚡: The fund grows as {member_name} contributes {increase_amount} more sats, reaching {new_total}. Social observation: Goats are herd animals and can become depressed if kept in isolation.\n\n https://lightning-goats.com\n\n",
+    4: "⚡CyberHerd⚡: {member_name} has raised their contribution to {new_total} sats with an added {increase_amount}. Anatomical fact: Goats use their prehensile lips to be selective eaters, often choosing the most nutritious parts of a plant.\n\n https://lightning-goats.com\n\n",
+    5: "⚡CyberHerd⚡: An additional {increase_amount} sats from {member_name} brings their total to {new_total}. Behavioral insight: Goats are known for their curiosity and intelligence, often exploring new things and solving simple problems.\n\n https://lightning-goats.com\n\n",
+    6: "⚡CyberHerd⚡: {member_name}'s contribution has grown to {new_total} sats with {increase_amount} more. Did you know? Different goat breeds produce unique fibers, such as cashmere from Cashmere goats and mohair from Angora goats.\n\n https://lightning-goats.com\n\n",
+    7: "⚡CyberHerd⚡: With a new contribution of {increase_amount} sats, {member_name}'s total is now {new_total}. Communication fact: Mother goats and their kids can recognize each other's calls, a bond that helps keep the young safe.\n\n https://lightning-goats.com\n\n",
+    8: "⚡CyberHerd⚡: {member_name} has added {increase_amount} sats to the herd, for a new total of {new_total}. Agility fact: Goats are excellent climbers, with hooves adapted for gripping steep and rocky terrain.\n\n https://lightning-goats.com\n\n",
+    9: "⚡CyberHerd⚡: The total from {member_name} is now {new_total} sats after contributing another {increase_amount}. Cognitive fact: Studies have shown that goats can differentiate between human facial expressions and prefer happy faces.\n\n https://lightning-goats.com\n\n",
+    10: "⚡CyberHerd⚡: {member_name} contributes {increase_amount} more, bringing their total to {new_total}. Health fact: Goat milk is often considered easier to digest than cow's milk because it has smaller fat globules and is naturally homogenized.\n\n https://lightning-goats.com\n\n",
+    11: "⚡CyberHerd⚡: A contribution of {increase_amount} sats from {member_name} increases their total to {new_total}. Did you know? 'Fainting' goats have a genetic condition called myotonia congenita, which causes their muscles to stiffen when startled.\n\n https://lightning-goats.com\n\n",
+    12: "⚡CyberHerd⚡: {member_name} has increased their total to {new_total} sats by adding {increase_amount}. Environmental fact: Goats are effective browsers and are often used for land management to clear brush and control invasive plant species.\n\n https://lightning-goats.com\n\n",
+    13: "⚡CyberHerd⚡: With {increase_amount} more sats, {member_name}'s total contribution is now {new_total}. Communication fact: Goats may develop 'accents,' with their bleats changing to sound like those of their social group.\n\n https://lightning-goats.com\n\n",
+    14: "⚡CyberHerd⚡: {member_name} adds another {increase_amount} sats, reaching a total of {new_total}. Anatomical fact: Unlike sheep, the tails of most goat breeds point upwards unless the goat is sick or distressed.\n\n https://lightning-goats.com\n\n",
+    15: "⚡CyberHerd⚡: {member_name} now has a total of {new_total} sats contributed after adding {increase_amount}. Did you know? A male goat is called a 'buck' or 'billy,' a female is a 'doe' or 'nanny,' and a young goat is a 'kid.'\n\n https://lightning-goats.com\n\n",
+    16: "⚡CyberHerd⚡: The contribution from {member_name} grows by {increase_amount} sats to {new_total}. Historical legend: Coffee was supposedly discovered when an Ethiopian goat herder noticed his goats became energetic after eating coffee cherries.\n\n https://lightning-goats.com\n\n",
+    17: "⚡CyberHerd⚡: {member_name} adds {increase_amount} more sats, for a new total of {new_total}. Dietary fact: Goats are selective feeders and will often refuse to eat hay that is soiled or has been trampled on.\n\n https://lightning-goats.com\n\n",
+    18: "⚡CyberHerd⚡: {member_name}'s total contribution is now {new_total} sats after an increase of {increase_amount}. Did you know? Goats do not have teeth on their upper front jaw; instead, they have a hard dental pad.\n\n https://lightning-goats.com\n\n",
+    19: "⚡CyberHerd⚡: With an added {increase_amount} sats, {member_name}'s total is now {new_total}. Behavioral insight: Goats dislike rain and puddles and will seek shelter to avoid getting wet.\n\n https://lightning-goats.com\n\n",
+    20: "⚡CyberHerd⚡: {member_name} has increased their support with {increase_amount} more sats, reaching {new_total}. Global fact: More people worldwide consume goat milk than cow's milk.\n\n https://lightning-goats.com\n\n",
+    21: "⚡CyberHerd⚡: An additional {increase_amount} sats from {member_name} brings their total to {new_total}. Social fact: Within a herd, goats form complex social structures and hierarchies.\n\n https://lightning-goats.com\n\n",
+    22: "⚡CyberHerd⚡: {member_name} contributes {increase_amount} sats, bringing their total to {new_total}. Did you know? Goats can be taught their name and to come when called.\n\n https://lightning-goats.com\n\n",
+    23: "⚡CyberHerd⚡: The total for {member_name} is now {new_total} sats after an addition of {increase_amount}. Anatomical fact: The beard-like appendages on a goat's neck are called wattles and serve no known purpose.\n\n https://lightning-goats.com\n\n",
+    24: "⚡CyberHerd⚡: {member_name} has raised their contribution to {new_total} with {increase_amount} more sats. Cognitive fact: Goats have demonstrated long-term memory, remembering learned tasks for at least 10 months.\n\n https://lightning-goats.com\n\n",
+    25: "⚡CyberHerd⚡: {member_name}'s contribution total is now {new_total} after adding {increase_amount} sats. Did you know? Goats use a sneeze-like sound to warn other herd members of potential danger.\n\n https://lightning-goats.com\n\n",
+    26: "⚡CyberHerd⚡: By adding {increase_amount} sats, {member_name}'s total is now {new_total}. Environmental fact: Goats' grazing habits can help prevent wildfires by reducing the amount of flammable brush.\n\n https://lightning-goats.com\n\n",
+    27: "⚡CyberHerd⚡: {member_name} has increased their contribution to {new_total} sats. Did you know? The lifespan of a domestic goat is typically between 15 and 18 years.\n\n https://lightning-goats.com\n\n",
+    28: "⚡CyberHerd⚡: With another {increase_amount} sats, {member_name}'s total reaches {new_total}. Social fact: Mother goats will often call to their kids to ensure they remain close by in the herd.\n\n https://lightning-goats.com\n\n",
+    29: "⚡CyberHerd⚡: {member_name} adds {increase_amount} sats to their total, which is now {new_total}. Did you know? The term 'scapegoat' originates from an ancient Hebrew tradition involving goats.\n\n https://lightning-goats.com\n\n",
+    30: "⚡CyberHerd⚡: The total from {member_name} has grown to {new_total} sats with an additional {increase_amount}. Anatomical fact: A goat's horns are made of living bone surrounded by keratin and are used for defense, dominance, and thermoregulation.\n\n https://lightning-goats.com\n\n",
+    31: "⚡CyberHerd⚡: {member_name}'s new total is {new_total} sats after a contribution of {increase_amount}. Behavioral fact: Goats are playful animals, especially when young, and engage in activities like climbing and jumping for enjoyment.\n\n https://lightning-goats.com\n\n",
+    32: "⚡CyberHerd⚡: An increase of {increase_amount} sats brings {member_name}'s total to {new_total}. Did you know? There are over 210 breeds of goats in the world.\n\n https://lightning-goats.com\n\n",
+    33: "⚡CyberHerd⚡: {member_name}'s contribution now stands at {new_total} sats after adding {increase_amount}. Sensory fact: Goats have an excellent sense of smell, which they use to find food and recognize other goats.\n\n https://lightning-goats.com\n\n",
+    34: "⚡CyberHerd⚡: With an additional {increase_amount} sats, {member_name} has a new total of {new_total}. Did you know? Genetically engineered goats can produce spider silk protein in their milk, which has valuable applications.\n\n https://lightning-goats.com\n\n",
+    35: "⚡CyberHerd⚡: {member_name} has added {increase_amount} sats, bringing their contribution to {new_total}. Ecological fact: In permaculture systems, goats are valued for their ability to clear land and provide manure for fertilizer.\n\n https://lightning-goats.com\n\n",
+    36: "⚡CyberHerd⚡: The total from {member_name} is now {new_total} sats after contributing {increase_amount} more. Health fact: Goat meat is leaner and has less cholesterol than beef, pork, or even chicken.\n\n https://lightning-goats.com\n\n",
+    37: "⚡CyberHerd⚡: {member_name} boosts their contribution by {increase_amount} sats, for a total of {new_total}. Did you know? A goat giving birth is said to be 'kidding.'\n\n https://lightning-goats.com\n\n",
+    38: "⚡CyberHerd⚡: A new contribution of {increase_amount} sats brings {member_name}'s total to {new_total}. Vision fact: The unique shape of their pupils gives goats good night vision.\n\n https://lightning-goats.com\n\n",
+    39: "⚡CyberHerd⚡: {member_name} has increased their support with another {increase_amount} sats, for a total of {new_total}. Agricultural fact: Goats play a vital role in sustainable agriculture by managing weeds without the need for herbicides.\n\n https://lightning-goats.com\n\n"
+}
+
+# Goat names mapping for message personalization
+goat_names_dict = {
+    "Dexter": [
+        "nostr:nprofile1qqsw4zlzyfx43mc88psnlse8sywpfl45kuap9dy05yzkepkvu6ca5wg7qyak5",
+        "ea8be2224d58ef0738613fc327811c14feb4b73a12b48fa1056c86cce6b1da39"
+    ],
+    "Rowan": [
+        "nostr:nprofile1qqs2w94r0fs29gepzfn5zuaupn969gu3fstj3gq8kvw3cvx9fnxmaugwur22r",
+        "a716a37a60a2a32112674173bc0ccba2a3914c1728a007b31d1c30c54ccdbef1"
+    ],
+    "Nova": [
+        "nostr:nprofile1qqsrzy7clymq5xwcfhh0dfz6zfe7h63k8r0j8yr49mxu6as4yv2084s0vf035",
+        "3113d8f9360a19d84deef6a45a1273ebea3638df2390752ecdcd76152314f3d6"
+    ],
+    "Cosmo": [
+        "nostr:nprofile1qqsq6n8u7dzrnhhy7xy78k2ee7e4wxlgrkm5g2rgjl3napr9q54n4ncvkqcsj",
+        "0d4cfcf34439dee4f189e3d959cfb3571be81db744286897e33e8465052b3acf"
+    ],
+    "Newton": [
+        "nostr:nprofile1qqszdsnpyzwhjcqads3hwfywt5jfmy85jvx8yup06yq0klrh93ldjxc26lmyx",
+        "26c261209d79601d6c2377248e5d249d90f4930c72702fd100fb7c772c7ed91b"
+    ]
+}
+
+# Special messages
+herd_reset_message = {
+    "message": "🐐 The herd has been reset! All goats are back to the starting gate. Time to rebuild the Lightning Goats community from scratch. Who will be the first to contribute?\n\nhttps://lightning-goats.com\n\n"
+}
+
+# Daily reset messages
+daily_reset_dict = {
+    0: "🌙 Daily midnight reset: CyberHerd cleared, payment metrics reset, system refreshed for a new day",
+    1: "🌅 New day, fresh start: CyberHerd has been reset for another day of Lightning Network activity",
+    2: "🔄 Daily cycle complete: All systems reset, CyberHerd cleared, ready for new members"
+}
+
+# Feeding payout messages for CyberHerd treats
+feeding_regular_dict = {
+    0: "CyberHerd Treats: {new_amount} sats! Thanks for being part of the herd! 🐐⚡",
+    1: "CyberHerd Treats: {new_amount} sats for our member {display_name}! 🐐🌟",
+    2: "CyberHerd Treats: {new_amount} sats delivered to {display_name}! 🐐💰",
+    3: "CyberHerd Treats: {new_amount} sats! Keep being awesome {display_name}! 🐐✨"
+}
+
+feeding_bonus_dict = {
+    0: "CyberHerd Treats (Bonus): {new_amount} sats for outstanding participation! 🐐⚡",
+    1: "CyberHerd Treats (Special): {new_amount} sats for being amazing! 🐐🌟",
+    2: "CyberHerd Treats (Extra): {new_amount} sats because you're awesome! 🐐🎁"
+}
+
+feeding_remainder_dict = {
+    0: "CyberHerd Treats (Remainder): {new_amount} sats from the feeding pool! 🐐💫",
+    1: "CyberHerd Treats (Final): {new_amount} sats to complete distribution! 🐐✅"
+}
+
+feeding_fallback_dict = {
+    0: "CyberHerd Treats (Remainder): {new_amount} sats from feeding distribution! 🐐⚡",
+    1: "CyberHerd Treats (Reserve): {new_amount} sats (no active members)! 🐐💰",
+    2: "CyberHerd Treats (Backup): {new_amount} sats (distribution recovery)! 🐐🔄"
+}
+
+# Payment metrics messages
+payment_metrics_dict = {
+    0: "📊 Payment metrics updated - check the system status!",
+    1: "💰 Payment statistics have been refreshed!",
+    2: "📈 Latest payment data available!"
+}
+
+# System status messages  
+system_status_dict = {
+    0: "⚙️ System status updated - all systems operational!",
+    1: "🔧 Current system metrics available!",
+    2: "📊 System health check completed!"
+}
+
+# Weather status messages
+weather_status_dict = {
+    0: "🌤️ Weather update received!",
+    1: "🌡️ Latest weather conditions available!",
+    2: "☀️ Weather data refreshed!"
 }
