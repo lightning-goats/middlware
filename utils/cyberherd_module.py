@@ -7,13 +7,7 @@ import httpx
 import subprocess
 
 from subprocess import TimeoutExpired, CompletedProcess
-
-# Default relays to use when none are provided
-DEFAULT_RELAYS = [
-    "wss://relay.primal.net/",
-    "wss://relay.damus.io/",
-    'wss://nostr.oxtr.dev'
-]
+from .helpers import DEFAULT_RELAYS
 
 # Logging Configuration
 logger = logging.getLogger(__name__)
