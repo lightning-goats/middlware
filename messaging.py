@@ -3,20 +3,41 @@ import json
 import random
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
+from dotenv import load_dotenv
+from utils.helpers import DEFAULT_RELAYS
+
+# Load environment variables
+load_dotenv()
+
+# Configure relays based on testing mode
+TESTING_MODE = os.getenv('TESTING_MODE', 'false').lower() == 'true' or os.getenv('TESTING', 'false').lower() == 'true'
+LOCAL_RELAY_URL = os.getenv('LOCAL_RELAY_URL', 'ws://127.0.0.1:7000')
+
+# Configure nak binary path
+NAK_PATH = os.getenv('NAK_PATH', 'nak')  # Default to 'nak' to use PATH, or set specific path
+
+if TESTING_MODE:
+    RELAY_URLS = LOCAL_RELAY_URL
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    logger.info(f"MESSAGING - TESTING MODE: Using only local relay at {LOCAL_RELAY_URL}")
+else:
+    # Use centralized relay configuration, converting to space-separated string format for nak
+    RELAY_URLS = ' '.join(DEFAULT_RELAYS) + ' ws://127.0.0.1:3002/nostrrelay/666'
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    logger.info("MESSAGING - PRODUCTION MODE: Using centralized relays")
 
 from messages import (
-    sats_received_dict,
-    feeder_trigger_dict,
-    variations,
-    thank_you_variations,
-    cyber_herd_dict,
-    cyber_herd_info_dict,
-    cyber_herd_treats_dict,
-    headbutt_info_dict,
-    headbutt_success_dict,
-    headbutt_failure_dict,
-    interface_info_dict
+    goat_names_dict, herd_reset_message,
+    cyber_herd_dict, cyber_herd_info_dict, cyber_herd_treats_dict,
+    interface_info_dict, sats_received_dict, headbutt_info_dict,
+    headbutt_success_dict, feeder_trigger_dict, headbutt_failure_dict,
+    member_increase_dict, thank_you_variations, variations,
+    daily_reset_dict, feeding_regular_dict, feeding_bonus_dict,
+    feeding_remainder_dict, feeding_fallback_dict,
+    payment_metrics_dict, system_status_dict, weather_status_dict
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -55,31 +76,12 @@ async def make_messages(
     event_type: str,
     cyber_herd_item: dict = None,
     spots_remaining: int = 0,
+    relays: Optional[List[str]] = None
 ):
     global notified
-
-    goat_names_dict = {
-        "Dexter":  [
-            "nostr:nprofile1qqsw4zlzyfx43mc88psnlse8sywpfl45kuap9dy05yzkepkvu6ca5wg7qyak5",
-            "ea8be2224d58ef0738613fc327811c14feb4b73a12b48fa1056c86cce6b1da39"
-        ],
-        "Rowan":   [
-            "nostr:nprofile1qqs2w94r0fs29gepzfn5zuaupn969gu3fstj3gq8kvw3cvx9fnxmaugwur22r",
-            "a716a37a60a2a32112674173bc0ccba2a3914c1728a007b31d1c30c54ccdbef1"
-        ],
-        "Nova":    [
-            "nostr:nprofile1qqsrzy7clymq5xwcfhh0dfz6zfe7h63k8r0j8yr49mxu6as4yv2084s0vf035",
-            "3113d8f9360a19d84deef6a45a1273ebea3638df2390752ecdcd76152314f3d6"
-        ],
-        "Cosmo":   [
-            "nostr:nprofile1qqsq6n8u7dzrnhhy7xy78k2ee7e4wxlgrkm5g2rgjl3napr9q54n4ncvkqcsj",
-            "0d4cfcf34439dee4f189e3d959cfb3571be81db744286897e33e8465052b3acf"
-        ],
-        "Newton":  [
-            "nostr:nprofile1qqszdsnpyzwhjcqads3hwfywt5jfmy85jvx8yup06yq0klrh93ldjxc26lmyx",
-            "26c261209d79601d6c2377248e5d249d90f4930c72702fd100fb7c772c7ed91b"
-        ]
-    }
+    
+    # Track goat data for client messages
+    selected_goats_data = None
 
     message_dict = {
         "sats_received": sats_received_dict,
@@ -90,7 +92,18 @@ async def make_messages(
         "headbutt_info": headbutt_info_dict,
         "headbutt_success": headbutt_success_dict,
         "headbutt_failure": headbutt_failure_dict,
+        "member_increase": member_increase_dict,
+        "new_member": cyber_herd_dict,
         "interface_info": interface_info_dict,
+        "herd_reset": {0: herd_reset_message["message"]},
+        "daily_reset": daily_reset_dict,
+        "feeding_regular": feeding_regular_dict,
+        "feeding_bonus": feeding_bonus_dict,
+        "feeding_remainder": feeding_remainder_dict,
+        "feeding_fallback": feeding_fallback_dict,
+        "payment_metrics": payment_metrics_dict,
+        "system_status": system_status_dict,
+        "weather_status": weather_status_dict
     }
 
     message_templates = message_dict.get(event_type, None)
@@ -127,6 +140,17 @@ async def make_messages(
             spots_info = f"⚡ {spots_remaining} more spots available. ⚡"
         elif spots_remaining == 1:
             spots_info = f"⚡ {spots_remaining} more spot available. ⚡"
+            
+        # Headbutt info (when herd is full - spots_remaining = 0)
+        headbutt_text = ""
+        if spots_remaining == 0 and cyber_herd_item and cyber_herd_item.get('headbutt_info'):
+            # Generate headbutt info message
+            headbutt_info = cyber_herd_item['headbutt_info']
+            required_sats = headbutt_info.get('required_sats', 10)
+            victim_name = headbutt_info.get('victim_name', 'Anon')
+            
+            headbutt_message = random.choice(list(headbutt_info_dict.values()))
+            headbutt_text = f" {headbutt_message.format(required_sats=required_sats, victim_name=victim_name)}"
 
         # Format the message for nostr
         message = (
@@ -138,13 +162,14 @@ async def make_messages(
                 event_id=event_id
             )
             + spots_info
+            + headbutt_text
         )
 
         command = (
-            f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
             f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
             f'-p {pub_key} '
-            f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+            f'{RELAY_URLS}'
         )
 
         message = (
@@ -156,38 +181,66 @@ async def make_messages(
                 event_id=event_id
             )
             + spots_info
+            + headbutt_text
         )
 
     elif event_type in ["sats_received", "feeder_triggered"]:
-        # Existing logic for handling those events
-        selected_goats = get_random_goat_names(goat_names_dict)
-        goat_names = join_with_and([name for name, _, _ in selected_goats])
-        goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
-        goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
+        # Check if the selected template contains goat names
+        if "{goat_name}" in template:
+            # Only generate goat data if the template uses goat names
+            selected_goats = get_random_goat_names(goat_names_dict)
+            
+            # Store goat data for client message
+            selected_goats_data = [
+                {
+                    "name": name,
+                    "imageUrl": f"images/{name.lower()}.png"
+                }
+                for name, _, _ in selected_goats
+            ]
+            
+            goat_names = join_with_and([name for name, _, _ in selected_goats])
+            goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
+            goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
 
-        variation_message = random.choice(list(variations.values()))
-        difference_message = variation_message.format(difference=difference)
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
 
-        # First formatting includes goat_nprofiles
-        message = template.format(
-            new_amount=new_amount,    # or amount, if you prefer
-            goat_name=goat_nprofiles,
-            difference_message=difference_message
-        )
+            # First formatting includes goat_nprofiles
+            message = template.format(
+                new_amount=new_amount,    # or amount, if you prefer
+                goat_name=goat_nprofiles,
+                difference_message=difference_message
+            )
 
-        pubkey_part = " ".join(f"-p {pubkey}" for pubkey in goat_pubkeys)
-        command = (
-            f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
-            f' --tag t=LightningGoats {pubkey_part} '
-            f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
-        )
+            pubkey_part = " ".join(f"-p {pubkey}" for pubkey in goat_pubkeys)
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
+                f' --tag t=LightningGoats {pubkey_part} '
+                f'{RELAY_URLS}'
+            )
 
-        # Then reformat to show goat_names in the final message
-        message = template.format(
-            new_amount=new_amount,
-            goat_name=goat_names,
-            difference_message=difference_message
-        )
+            # Then reformat to show goat_names in the final message
+            message = template.format(
+                new_amount=new_amount,
+                goat_name=goat_names,
+                difference_message=difference_message
+            )
+        else:
+            # Template doesn't use goat names, format without them
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
+            
+            message = template.format(
+                new_amount=new_amount,
+                difference_message=difference_message
+            )
+            
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
+                f' --tag t=LightningGoats '
+                f'{RELAY_URLS}'
+            )
 
     elif event_type == "interface_info":
         # Simple usage
@@ -224,21 +277,53 @@ async def make_messages(
         # Create Nostr command for headbutt info - reply to the cyberherd note
         if event_id:
             command = (
-                f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
                 f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
                 f'-p {victim_pubkey} '
-                f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+                f'{RELAY_URLS}'
             )
         else:
             # Fallback to standalone note if no event_id available
             command = (
-                f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
                 f'--tag t=CyberHerd --tag t=HeadbuttInfo '
-                f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+                f'{RELAY_URLS}'
             )
         
         # Override message for client formatting
         message = client_message
+
+    elif event_type == "cyber_herd_info":
+        # Handle cyber herd info message formatting
+        display_name = cyber_herd_item.get("display_name", "Anon") if cyber_herd_item else "Anon"
+        amount = cyber_herd_item.get("amount", 0) if cyber_herd_item else 0
+        nprofile = cyber_herd_item.get("nprofile", "") if cyber_herd_item else ""
+        
+        # Ensure nprofile is well-formed
+        if nprofile and not nprofile.startswith("nostr:"):
+            nprofile = f"nostr:{nprofile}"
+            
+        message = template.format(
+            new_amount=amount,
+            name=display_name if not nprofile else nprofile,
+            difference=difference
+        )
+        
+        # Command for posting to nostr
+        if cyber_herd_item and cyber_herd_item.get("pubkey"):
+            pub_key = cyber_herd_item.get("pubkey")
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
+                f'--tag t=CyberHerd --tag t=CyberHerdInfo '
+                f'-p {pub_key} '
+                f'{RELAY_URLS}'
+            )
+        else:
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
+                f'--tag t=CyberHerd --tag t=CyberHerdInfo '
+                f'{RELAY_URLS}'
+            )
 
     elif event_type == "headbutt_success":
         # Handle headbutt success message formatting
@@ -258,13 +343,24 @@ async def make_messages(
         if victim_nprofile and not victim_nprofile.startswith("nostr:"):
             victim_nprofile = f"nostr:{victim_nprofile}"
         
+        # Check for next headbutt info to append
+        next_headbutt_text = ""
+        if cyber_herd_item.get('next_headbutt_info'):
+            next_info = cyber_herd_item['next_headbutt_info']
+            required_sats = next_info.get('required_sats', 10)
+            next_victim_name = next_info.get('victim_name', 'Anon')
+            
+            # Generate a random headbutt info message for the next victim
+            next_headbutt_message = random.choice(list(headbutt_info_dict.values()))
+            next_headbutt_text = f" {next_headbutt_message.format(required_sats=required_sats, victim_name=next_victim_name)}"
+        
         # Create Nostr message with nprofiles
         nostr_message = template.format(
             attacker_name=attacker_nprofile if attacker_nprofile else attacker_name,
             attacker_amount=attacker_amount,
             victim_name=victim_nprofile if victim_nprofile else victim_name,
             victim_amount=victim_amount
-        )
+        ) + next_headbutt_text
         
         # Create client message with display names
         client_message = template.format(
@@ -272,17 +368,17 @@ async def make_messages(
             attacker_amount=attacker_amount,
             victim_name=victim_name,
             victim_amount=victim_amount
-        )
+        ) + next_headbutt_text
         
         # Use nostr_message for the command
         message = nostr_message
         
         # Create Nostr command for headbutt success - reply to the cyberherd note that was zapped
         command = (
-            f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
             f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
             f'-p {attacker_pubkey} -p {victim_pubkey} '
-            f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+            f'{RELAY_URLS}'
         )
         
         # Override message for client formatting
@@ -293,25 +389,35 @@ async def make_messages(
         attacker_name = cyber_herd_item.get("attacker_name", "Anon")
         attacker_amount = cyber_herd_item.get("attacker_amount", 0)
         required_amount = cyber_herd_item.get("required_amount", 0)
+        victim_name = cyber_herd_item.get("victim_name", "Anon")
+        victim_amount = cyber_herd_item.get("victim_amount", 0)
         attacker_pubkey = cyber_herd_item.get("attacker_pubkey", "")
+        victim_pubkey = cyber_herd_item.get("victim_pubkey", "")
         event_id = cyber_herd_item.get("event_id", "")
         attacker_nprofile = cyber_herd_item.get("attacker_nprofile", "")
+        victim_nprofile = cyber_herd_item.get("victim_nprofile", "")
         
-        # Ensure nprofile is well-formed
+        # Ensure nprofiles are well-formed
         if attacker_nprofile and not attacker_nprofile.startswith("nostr:"):
             attacker_nprofile = f"nostr:{attacker_nprofile}"
+        if victim_nprofile and not victim_nprofile.startswith("nostr:"):
+            victim_nprofile = f"nostr:{victim_nprofile}"
         
-        # Create Nostr message with nprofile
+        # Create Nostr message with nprofiles
         nostr_message = template.format(
             attacker_name=attacker_nprofile if attacker_nprofile else attacker_name,
             attacker_amount=attacker_amount,
+            victim_name=victim_nprofile if victim_nprofile else victim_name,
+            victim_amount=victim_amount,
             required_amount=required_amount
         )
         
-        # Create client message with display name
+        # Create client message with display names
         client_message = template.format(
             attacker_name=attacker_name,
             attacker_amount=attacker_amount,
+            victim_name=victim_name,
+            victim_amount=victim_amount,
             required_amount=required_amount
         )
         
@@ -320,10 +426,10 @@ async def make_messages(
         
         # Create Nostr command for headbutt failure - reply to the cyberherd note that was zapped
         command = (
-            f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
             f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
-            f'-p {attacker_pubkey} '
-            f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+            f'-p {attacker_pubkey} -p {victim_pubkey} '
+            f'{RELAY_URLS}'
         )
         
         # Override message for client formatting
@@ -346,10 +452,111 @@ async def make_messages(
         
         # Create simple command for treats - no specific event to reply to
         command = (
-            f'/usr/local/bin/nak event --sec {nos_sec} -c "{message}" '
+            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
             f'--tag t=CyberHerd --tag t=Treats '
-            f'wss://relay.damus.io wss://relay.artx.market/ wss://relay.primal.net/ ws://127.0.0.1:3002/nostrrelay/666'
+            f'{RELAY_URLS}'
         )
+
+    elif event_type == "member_increase":
+        # Handle existing member amount increase message formatting
+        display_name = cyber_herd_item.get("display_name", "Anon")
+        event_id = cyber_herd_item.get("event_id", "")
+        pub_key = cyber_herd_item.get("pubkey", "")
+        nprofile = cyber_herd_item.get("nprofile", "")
+        amount = cyber_herd_item.get("amount", 0)  # This is the new total
+        new_zap_amount = cyber_herd_item.get("new_zap_amount", 0)  # This is the increase amount
+        
+        # Ensure nprofile is well-formed
+        if nprofile and not nprofile.startswith("nostr:"):
+            nprofile = f"nostr:{nprofile}"
+            
+        # Format the message for nostr
+        message = template.format(
+            member_name=nprofile if nprofile else display_name,
+            increase_amount=new_zap_amount,
+            new_total=amount
+        )
+        
+        command = (
+            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
+            f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+            f'-p {pub_key} '
+            f'{RELAY_URLS}'
+        )
+        
+        # Also format message for client display with display name
+        message = template.format(
+            member_name=display_name,
+            increase_amount=new_zap_amount,
+            new_total=amount
+        )
+
+    elif event_type == "new_member":
+        name = cyber_herd_item.get('display_name', 'Anon')
+        amount = cyber_herd_item.get('amount', 0)
+        nprofile = cyber_herd_item.get('nprofile', '')
+        
+        # Ensure nprofile is well-formed
+        if nprofile and not nprofile.startswith("nostr:"):
+            nprofile = f"nostr:{nprofile}"
+        
+        thanks_part = random.choice(thank_you_variations).format(new_amount=amount)
+        
+        # Use nprofile for the nostr message, display_name for client message
+        nostr_message = template.format(name=nprofile, thanks_part=thanks_part, difference=difference, new_amount=amount, event_id=cyber_herd_item.get('event_id', ''))
+        message = template.format(name=name, thanks_part=thanks_part, difference=difference, new_amount=amount, event_id=cyber_herd_item.get('event_id', ''))
+        
+        # For new members, the command should reference their own pubkey and event_id
+        pubkey = cyber_herd_item.get('pubkey')
+        event_id = cyber_herd_item.get('event_id')
+        
+        if pubkey and event_id:
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message}" '
+                f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+                f'-p {pubkey} '
+                f'{RELAY_URLS}'
+            )
+        else:
+            logger.warning("Missing pubkey or event_id for new_member notification")
+
+    elif event_type == "daily_reset":
+        # Simple message for daily reset, no special formatting needed
+        message = template
+        
+    elif event_type in ["feeding_regular", "feeding_bonus", "feeding_remainder", "feeding_fallback"]:
+        # Feeding messages support display_name and amount formatting
+        display_name = cyber_herd_item.get("display_name", "member") if cyber_herd_item else "member"
+        amount = int(new_amount) if new_amount else 0
+        
+        message = template.format(
+            new_amount=amount,
+            display_name=display_name
+        )
+
+    elif event_type == "payment_metrics":
+        # Format payment metrics data using the dedicated formatter
+        if cyber_herd_item:
+            formatted_message = format_payment_metrics_message(cyber_herd_item)
+            message = formatted_message if formatted_message else template
+        else:
+            message = template
+
+    elif event_type == "system_status":
+        # Format system status data using the dedicated formatter
+        if cyber_herd_item:
+            formatted_message = format_system_status_message(cyber_herd_item)
+            message = formatted_message if formatted_message else template
+        else:
+            message = template
+
+    elif event_type == "weather_status":
+        # Format weather data using the dedicated formatter
+        if cyber_herd_item:
+            formatted_message = format_weather_message(cyber_herd_item)
+            message = formatted_message if formatted_message else template
+        else:
+            message = template
 
     # Helper to run the command
     async def execute_command(command):
@@ -367,28 +574,210 @@ async def make_messages(
 
     command_output = None
     if command:
-        command_output = await execute_command(command)
+        raw_output = await execute_command(command)
+        command_output = extract_id_from_stdout(raw_output) if raw_output else None
 
-    client_message = await format_client_message(message, event_type)
+    client_message = await format_client_message(message, event_type, selected_goats_data)
 
     return client_message, command_output
 
 
-async def format_client_message(message: str, event_type):
+async def format_client_message(message: str, event_type: str, goat_data: Optional[List[dict]] = None):
     """
     Format a given message to all connected WebSocket clients in JSON.
     
     Args:
         message: The message content to send
         event_type: The type of event (e.g., "cyber_herd", "sats_received", "feeder_triggered", etc.)
+        goat_data: Optional list of goat data with name and imageUrl for accordion display
     """
 
-    
-    # Wrap the message in a JSON object with type and message fields
-    json_message = json.dumps({
+    # Create base message object
+    json_obj = {
         "type": event_type,
         "message": message
-    })
+    }
+    
+    # Add goat data if available (for sats_received messages that show goats in accordion)
+    if goat_data:
+        json_obj["goats"] = goat_data
+    
+    # Wrap the message in a JSON object with type and message fields
+    json_message = json.dumps(json_obj)
 
     return json_message
 
+
+def format_payment_metrics_message(data):
+    """Format payment metrics data into a human-readable message."""
+    try:
+        parts = []
+        
+        if data.get('total_payments') is not None:
+            parts.append(f"💰 {data['total_payments']} total payments")
+        
+        if data.get('cyberherd_payments_detected') is not None:
+            parts.append(f"🐐 {data['cyberherd_payments_detected']} CyberHerd payments")
+        
+        if data.get('feeder_triggers') is not None:
+            parts.append(f"⚡ {data['feeder_triggers']} feeder triggers")
+        
+        if data.get('failed_payments') is not None and data['failed_payments'] > 0:
+            parts.append(f"❌ {data['failed_payments']} failed payments")
+        
+        return ' • '.join(parts) if parts else None
+    except Exception as error:
+        logger.error(f"Error formatting payment metrics message: {error}")
+        return None
+
+
+def format_system_status_message(data):
+    """Format system status data into a human-readable message."""
+    try:
+        parts = []
+        
+        if data.get('current_balance') is not None and data.get('trigger_amount') is not None:
+            remaining = max(data['trigger_amount'] - data['current_balance'], 0)
+            parts.append(f"⚡ {remaining} sats until next feeding")
+        
+        if data.get('active_connections') is not None:
+            parts.append(f"👥 {data['active_connections']} active connections")
+        
+        if data.get('uptime_hours') is not None:
+            hours = round(data['uptime_hours'] * 10) / 10
+            parts.append(f"⏱️ {hours}h uptime")
+        
+        if data.get('cyberherd_spots') is not None:
+            parts.append(f"🐐 {data['cyberherd_spots']} CyberHerd spots available")
+        
+        return ' • '.join(parts) if parts else None
+    except Exception as error:
+        logger.error(f"Error formatting system status message: {error}")
+        return None
+
+
+def format_weather_message(data):
+    """Format weather data into a human-readable message."""
+    try:
+        parts = []
+        
+        if data.get('temperature_f') is not None:
+            parts.append(f"🌡️ {data['temperature_f']}°F")
+        
+        if data.get('humidity') is not None:
+            parts.append(f"💧 {data['humidity']}% humidity")
+        
+        if data.get('wind_speed') is not None:
+            wind_part = f"💨 {data['wind_speed']} mph"
+            if data.get('wind_direction'):
+                wind_part += f" {data['wind_direction']}"
+            parts.append(wind_part)
+        
+        if data.get('uv_index') is not None:
+            uv_level = ''
+            uv_index = data['uv_index']
+            if uv_index >= 8:
+                uv_level = ' (very high!)'
+            elif uv_index >= 6:
+                uv_level = ' (high)'
+            elif uv_index >= 3:
+                uv_level = ' (moderate)'
+            else:
+                uv_level = ' (low)'
+            parts.append(f"☀️ UV {uv_index}{uv_level}")
+        
+        return f"🌤️ Weather: {' • '.join(parts)}" if parts else None
+    except Exception as error:
+        logger.error(f"Error formatting weather message: {error}")
+        return None
+
+
+# WebSocket Client Messaging
+# These functions will be set by main.py to handle WebSocket communication
+_websocket_clients = None
+_clients_lock = None
+
+def set_websocket_clients(clients_set, lock):
+    """Set the WebSocket clients and lock from main.py"""
+    global _websocket_clients, _clients_lock
+    _websocket_clients = clients_set
+    _clients_lock = lock
+
+async def send_to_websocket_clients(message: str):
+    """Send a message to all connected WebSocket clients."""
+    if not message:
+        logger.warning("Attempted to send an empty message to WebSocket clients. Skipping.")
+        return
+
+    if not _websocket_clients or not _clients_lock:
+        logger.warning("WebSocket clients not initialized. Cannot send message.")
+        return
+
+    async with _clients_lock:
+        if _websocket_clients:
+            logger.info(f"Broadcasting message to {len(_websocket_clients)} WebSocket clients: {message}")
+            # Create a copy to avoid issues with modifying the set while iterating
+            clients_to_send = _websocket_clients.copy()
+            failed_clients = set()
+            
+            for client in clients_to_send:
+                try:
+                    await client.send_text(message)
+                except Exception as e:
+                    logger.warning(f"Failed to send message to WebSocket client, marking for removal: {e}")
+                    failed_clients.add(client)
+            
+            # Remove failed clients in a separate operation to avoid race conditions
+            for failed_client in failed_clients:
+                _websocket_clients.discard(failed_client)
+    
+    if not _websocket_clients:
+        logger.debug("No connected WebSocket clients to send messages to.")
+
+async def send_cyberherd_update(newest_pubkey: str = None, database=None):
+    """Send updated CyberHerd member list to all connected clients for accordion display."""
+    if not database:
+        logger.error("Database connection required for CyberHerd update")
+        return
+        
+    try:
+        # Get all current CyberHerd members
+        query = "SELECT * FROM cyber_herd ORDER BY amount DESC, payouts DESC"
+        herd_members = await database.fetch_all(query)
+        
+        if not herd_members:
+            logger.debug("No CyberHerd members to send.")
+            return
+        
+        # Format member data for frontend accordion display
+        formatted_members = []
+        for member in herd_members:
+            # Convert database row to dict to use .get() method
+            member_dict = dict(member)
+            member_data = {
+                "pubkey": member_dict.get("pubkey", ""),
+                "display_name": member_dict.get("display_name", "Anon"),
+                "name": member_dict.get("display_name", "Anon"),  # Alias for display_name
+                "picture": member_dict.get("picture", ""),
+                "imageUrl": member_dict.get("picture", ""),  # Alias for picture
+                "amount": member_dict.get("amount", 0),
+                "payouts": member_dict.get("payouts", 0),
+                "kinds": member_dict.get("kinds", ""),
+                "timestamp": member_dict.get("notified", 0),
+                "is_newest": newest_pubkey and member_dict.get("pubkey") == newest_pubkey
+            }
+            formatted_members.append(member_data)
+        
+        # Create cyber_herd message for frontend
+        cyberherd_message = {
+            "type": "cyber_herd",
+            "members": formatted_members,
+            "newest_pubkey": newest_pubkey,
+            "total_members": len(formatted_members)
+        }
+        
+        await send_to_websocket_clients(json.dumps(cyberherd_message))
+        logger.info(f"Sent CyberHerd update with {len(formatted_members)} members")
+        
+    except Exception as e:
+        logger.error(f"Error sending CyberHerd update: {e}")
