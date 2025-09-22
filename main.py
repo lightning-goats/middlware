@@ -1,21 +1,3 @@
-"""
-CyberHerd Payment System - Simplified LNURL-Only Implementation
-
-IMPORTANT: As of August 2025, this system has been simplified to use ONLY simple LNURL payments 
-for all CyberHerd distributions. The complex Nostr zap functionality has been removed to improve 
-reliability and reduce failure rates.
-
-Key Changes:
-- enhanced_zap_lud16() now uses only make_simple_lnurl_payment()
-- zap_predefined_wallet_directly() uses only simple LNURL payments
-- Removed complex Nostr zap detection and fallback logic
-- Eliminated HTTP 500 errors from complex callback URLs
-- Improved payment success rates by using proven LNURL-only approach
-
-This ensures more reliable CyberHerd distributions without the complexity and failure points 
-of Nostr zap integration.
-"""
-
 from math import floor
 import os
 import json
@@ -45,6 +27,32 @@ import logging
 import math
 import random
 import time
+from utils.database import (
+    init_database,
+    is_zap_event_processed,
+    mark_zap_event_processing,
+    mark_zap_event_completed,
+    mark_zap_event_failed,
+    cleanup_failed_zap_events,
+    DatabaseCache,
+    background_cache_cleanup,
+    database,
+    comprehensive_database_setup
+)
+from datetime import datetime, timedelta, timezone
+
+CYBERHERD_CACHE_PREFIX = "cyberherd_tags"
+_daily_cache = DatabaseCache(database)
+
+def _today_key() -> str:
+    today = datetime.now(timezone.utc).date()
+    return f"{CYBERHERD_CACHE_PREFIX}:{today.isoformat()}"
+
+def _ttl_until_next_midnight() -> int:
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).date()
+    next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
+    return max(60, int((next_midnight - now).total_seconds()))
 
 # Global HTTP client
 http_client: httpx.AsyncClient = None
@@ -70,7 +78,7 @@ from tenacity import (
 )
 
 import messaging
-from utils.cyberherd_module import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag, lookup_relay_list
+from services.cyberherd_service import MetadataFetcher, Verifier, generate_nprofile, check_cyberherd_tag, lookup_relay_list
 from utils.nostr_signing import sign_event, sign_zap_event
 from utils.helpers import calculate_payout, parse_kinds, DEFAULT_RELAYS
 from utils.database import (
@@ -84,14 +92,14 @@ from utils.database import (
     cleanup_cache,
     database
 )
-from utils.headbutt import EnhancedHeadbuttService
-from utils.database_service import CyberherdDatabaseService
-from utils.messaging_service import HeadbuttMessagingService
+from services.headbutt import EnhancedHeadbuttService
+from services.database_service import CyberherdDatabaseService
+from services.messaging_service import HeadbuttMessagingService
 
 # Configuration and Constants
 MAX_HERD_SIZE = 3
 PREDEFINED_WALLET_PERCENT_RESET = 100
-TRIGGER_AMOUNT_SATS = 850
+TRIGGER_AMOUNT_SATS = 1000
 HEADBUTT_MIN_SATS = 10
 
 # Use centralized relay configuration from utils.helpers
@@ -114,6 +122,7 @@ for var in optional_env_vars:
 
 notification_semaphore = asyncio.Semaphore(6)  # limit concurrent notifications
 http_request_semaphore = asyncio.Semaphore(5)  # limit concurrent HTTP requests to LNBits
+openhab_request_semaphore = asyncio.Semaphore(3)  # limit concurrent HTTP requests to OpenHAB  
 payment_processing_semaphore = asyncio.Semaphore(2)  # limit concurrent payment processing
 
 # Logging Configuration
@@ -137,10 +146,10 @@ async def lifespan(app: FastAPI):
         keepalive_expiry=30.0         # Close idle connections after 30s
     )
     timeout = httpx.Timeout(
-        connect=10.0,   # Connection timeout
-        read=30.0,      # Read timeout
-        write=10.0,     # Write timeout
-        pool=5.0        # Pool acquisition timeout
+        connect=5.0,    # Connection timeout - reduced for faster failure
+        read=5.0,       # Read timeout - reduced for faster failure  
+        write=5.0,      # Write timeout - reduced for faster failure
+        pool=2.0        # Pool acquisition timeout - reduced for faster failure
     )
     http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
 
@@ -150,85 +159,35 @@ async def lifespan(app: FastAPI):
     if not connected:
         logger.warning("Initial WebSocket connection attempt timed out")
 
-    # Connect to database and create tables
-    logger.info("🔧 Initializing database...")
+    # Connect to database (database tables already exist from previous setup)
+    logger.info("🔧 Connecting to database...")
     await init_database()
+    await comprehensive_database_setup()
     
-    # Run comprehensive database setup and verification
-    try:
-        logger.info("🔧 Running database setup and verification...")
-        # Import and run the database setup functions directly
-        from add_processed_events import create_missing_tables, verify_database_integrity
-        
-        # Create missing tables if needed
-        tables_created = await create_missing_tables()
-        if not tables_created:
-            logger.error("❌ Failed to create required database tables")
-            raise RuntimeError("Database table creation failed")
-        
-        # Verify integrity
-        integrity_ok = await verify_database_integrity()
-        if not integrity_ok:
-            logger.error("❌ Database integrity verification failed")
-            raise RuntimeError("Database integrity check failed")
-            
-        logger.info("✅ Database setup and verification completed successfully")
-        
-    except Exception as e:
-        logger.error(f"❌ Database setup failed: {e}")
-        # Continue with fallback verification
+    logger.info("✅ Database connected successfully")
 
-    # Ensure all required tables exist with proper migrations
+    # Ensure critical tables exist
     try:
-        # Add status column if it doesn't exist
-        await database.execute('ALTER TABLE processed_zap_events ADD COLUMN status TEXT DEFAULT "completed"')
-        logger.info("Added status column to processed_zap_events table")
+        await database.execute('''
+            CREATE TABLE IF NOT EXISTS processed_zap_events (
+                zap_event_id TEXT PRIMARY KEY,
+                pubkey TEXT NOT NULL,
+                original_event_id TEXT NOT NULL,
+                processed_at REAL NOT NULL,
+                amount INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'completed'
+            )
+        ''')
+        await database.execute('''
+            CREATE TABLE IF NOT EXISTS cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                expires_at REAL NOT NULL
+            )
+        ''')
+        logger.info("✅ Critical tables verified")
     except Exception as e:
-        # Column likely already exists, which is fine
-        logger.debug(f"Status column migration: {e}")
-    
-    try:
-        # Add event_type column if it doesn't exist  
-        await database.execute('ALTER TABLE processed_events ADD COLUMN event_type TEXT DEFAULT "unknown"')
-        logger.info("Added event_type column to processed_events table")
-    except Exception as e:
-        # Column likely already exists, which is fine
-        logger.debug(f"Event_type column migration: {e}")
-    
-    # Verify critical tables exist
-    try:
-        # More robust table verification - check that tables actually exist
-        required_tables = ['cyber_herd', 'processed_events', 'processed_zap_events', 'cache']
-        
-        # Check if all required tables exist
-        for table_name in required_tables:
-            table_check_query = """
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name=:table_name
-            """
-            result = await database.fetch_one(table_check_query, values={'table_name': table_name})
-            if not result:
-                logger.error(f"❌ Table {table_name} does not exist")
-                raise RuntimeError(f"Critical database table {table_name} is missing - run add_processed_events.py")
-        
-        # Verify tables are accessible by doing simple queries
-        await database.fetch_one("SELECT COUNT(*) as count FROM cyber_herd LIMIT 1")
-        await database.fetch_one("SELECT COUNT(*) as count FROM processed_events LIMIT 1") 
-        await database.fetch_one("SELECT COUNT(*) as count FROM processed_zap_events LIMIT 1")
-        await database.fetch_one("SELECT COUNT(*) as count FROM cache LIMIT 1")
-        
-        logger.info("✅ All database tables verified and accessible")
-    except Exception as e:
-        logger.error(f"❌ Database table verification failed: {e}")
-        # Try to call the setup script automatically
-        try:
-            logger.info("🔧 Attempting to create missing tables...")
-            from add_processed_events import create_missing_tables
-            await create_missing_tables()
-            logger.info("✅ Database tables created successfully")
-        except Exception as setup_error:
-            logger.error(f"❌ Failed to create database tables: {setup_error}")
-            raise RuntimeError("Critical database tables are missing and could not be created automatically - run add_processed_events.py manually")
+        logger.error(f"❌ Failed to create critical tables: {e}")
 
     try:
         # Initial balance fetch - only HTTP call needed, WebSocket will handle all updates
@@ -236,9 +195,6 @@ async def lifespan(app: FastAPI):
         balance_value = await get_balance(force_refresh=True)
         app_state.balance = math.floor(balance_value / 1000)  # Convert from millisats to sats
         logger.info(f"✅ Initial balance: {app_state.balance} sats (subsequent updates via WebSocket)")
-        
-        # Initialize goat_sats_state cache
-        await get_goat_sats_sum_today()
         
         # Clean up any failed zap events from previous runs
         await cleanup_failed_zap_events()
@@ -251,7 +207,7 @@ async def lifespan(app: FastAPI):
         app_state.balance = 0
 
     # Start background tasks
-    asyncio.create_task(cleanup_cache())
+    asyncio.create_task(background_cache_cleanup())
     asyncio.create_task(schedule_daily_reset())
     asyncio.create_task(periodic_informational_messages())
     
@@ -321,7 +277,7 @@ async def recover_missed_zaps_on_startup():
         midnight_timestamp = int(midnight.timestamp())
         
         # Use a subset of relays for faster recovery (first 2 relays only)
-        recovery_relays = RELAYS[:2]  # Use only first 2 relays for speed
+        recovery_relays = RELAYS[:2]
         relays_str = " ".join(recovery_relays)
         
         # Use hex key from existing config
@@ -398,6 +354,15 @@ async def recover_missed_zaps_on_startup():
             return
         
         logger.info(f"📝 Found {len(cyberherd_note_ids)} CyberHerd notes from today")
+
+        # Populate daily cache to avoid future relay queries for tag checks
+        try:
+            key = _today_key()
+            ttl = _ttl_until_next_midnight()
+            await _daily_cache.set(key, cyberherd_note_ids, ttl=ttl)
+            logger.info(f"✅ Cached {len(cyberherd_note_ids)} CyberHerd-tagged note IDs for today")
+        except Exception as e:
+            logger.warning(f"Could not cache CyberHerd note IDs: {e}")
         
         # Step 2: Search for zaps to each CyberHerd note (non-blocking)
         recovered_count = 0
@@ -539,7 +504,7 @@ async def process_missed_zap_event(zap_data: dict):
             logger.error("bolt11 library not available - cannot process missed zaps")
             return
             
-        from utils.cyberherd_module import MetadataFetcher, generate_nprofile, lookup_relay_list, Verifier
+        from services.cyberherd_service import MetadataFetcher, generate_nprofile, lookup_relay_list, Verifier
         
         current_event_id = zap_data.get('id')
         
@@ -660,6 +625,12 @@ async def process_missed_zap_event(zap_data: dict):
                 
                 # Generate nprofile
                 nprofile = await generate_nprofile(zapper_pubkey)
+
+                # Fetch the user's specific relays using the function
+                user_relays = await lookup_relay_list(zapper_pubkey, RELAYS)
+
+                # Use the user's relays if found, otherwise fall back to the application's default
+                final_relays = user_relays if user_relays else RELAYS[:2]
                 
                 # Create CyberHerdData object and process via existing pipeline
                 cyberherd_data = CyberHerdData(
@@ -672,7 +643,7 @@ async def process_missed_zap_event(zap_data: dict):
                     lud16=lud16,
                     amount=zap_amount_sats,
                     picture=picture,
-                    relays=RELAYS[:2]
+                    relays=final_relays
                 )
                 
                 logger.info(f"🎯 Processing missed CyberHerd zap via pipeline: {zap_amount_sats} sats from {display_name}")
@@ -691,12 +662,8 @@ async def process_missed_zap_event(zap_data: dict):
                 await process_single_cyberherd_item(cyberherd_data, skip_duplicate_check=True)
                 
             else:
-                # Process as regular payment - update goat sats and generate message
+                # Process as regular payment - generate message
                 logger.info(f"💰 Processing missed zap as regular payment: {zap_amount_sats} sats")
-                
-                # Update goat sats (same as regular payment processing)
-                if zap_amount_sats > 0:
-                    await update_goat_sats(zap_amount_sats)
                 
                 # Update balance
                 async with app_state.lock:
@@ -707,7 +674,7 @@ async def process_missed_zap_event(zap_data: dict):
                 
                 # Generate regular payment message
                 if zap_amount_sats >= 10:
-                    difference = TRIGGER_AMOUNT_SATS - app_state.balance
+                    difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
                     message, _ = await messaging.make_messages(
                         config['NOS_SEC'], 
                         zap_amount_sats, 
@@ -726,7 +693,6 @@ async def process_missed_zap_event(zap_data: dict):
                             
                             payment_amount = app_state.balance
                             
-                            # Use direct zap payments 
                             payment_result = await pay_cyberherd_members_with_splits(payment_amount)
                             
                             if payment_result['success']:
@@ -805,7 +771,6 @@ headbutt_service = EnhancedHeadbuttService(
     max_herd_size=MAX_HERD_SIZE,
     headbutt_min_sats=HEADBUTT_MIN_SATS,
     config=config,
-    send_messages_to_clients_func=None,  # Will be set after function is defined
     make_messages_func=None  # Will be set after messaging is imported
 )
 
@@ -821,6 +786,10 @@ headbutt_messaging_service.websocket_clients = connected_clients
 # Note: make_messages functions will be set later
 
 # Pydantic Models
+class BitcoinData(BaseModel):
+    btc_usd_price: Optional[float] = None
+    btc_price_24h_percent_change: Optional[float] = None
+
 class HookData(BaseModel):
     payment_hash: str
     description: Optional[str] = None
@@ -838,7 +807,7 @@ class CyberHerdData(BaseModel):
     payouts: float = 0.0
     amount: Optional[int] = 0
     picture: Optional[str] = None
-    relays: Optional[List[str]] = RELAYS[:2]  # Default to first two relays from configuration
+    relays: Optional[List[str]] = RELAYS[:2]
 
     class Config:
         extra = 'ignore'
@@ -846,9 +815,9 @@ class CyberHerdData(BaseModel):
     @validator('lud16')
     @classmethod
     def validate_lud16(cls, v):
-        if '@' not in v:
+        if not v or '@' not in v:
             raise ValueError('Invalid lud16 format')
-        return v
+        return v.lower()
 
 class CyberHerdTreats(BaseModel):
     lud16: str  # Lightning address (LUD16)
@@ -860,9 +829,6 @@ class CyberHerdTreats(BaseModel):
         if '@' not in v:
             raise ValueError('Invalid lud16 format')
         return v
-
-class SetGoatSatsData(BaseModel):
-    new_amount: int
 
 class PaymentRequest(BaseModel):
     balance: int
@@ -878,8 +844,8 @@ app.add_middleware(
 
 http_retry = retry(
     reraise=True,
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
+    stop=stop_after_attempt(3),  # Reduced from 5 to 3 attempts
+    wait=wait_exponential(multiplier=1, min=1, max=4),  # Reduced wait times: 1s, 2s, 4s max
     retry=retry_if_exception_type(httpx.RequestError)
 )
 
@@ -893,6 +859,65 @@ def lnbits_http_retry(func):
             await asyncio.sleep(0.1)
             return await func(*args, **kwargs)
     return wrapper
+
+# Rate-limited HTTP retry decorator for OpenHAB requests  
+def openhab_http_retry(func):
+    """Decorator that combines rate limiting with retry logic for OpenHAB API calls"""
+    @http_retry
+    async def wrapper(*args, **kwargs):
+        async with openhab_request_semaphore:  # Rate limit concurrent OpenHAB requests
+            # Add small delay to prevent request storms to OpenHAB
+            await asyncio.sleep(0.1)
+            return await func(*args, **kwargs)
+    return wrapper
+
+@openhab_http_retry
+async def get_openhab_item_state(item_name: str) -> Optional[str]:
+    """Fetches the state of a specific OpenHAB item."""
+    try:
+        response = await http_client.get(
+            f'{config["OPENHAB_URL"]}/rest/items/{item_name}/state',
+            auth=(config['OH_AUTH_1'], '')
+        )
+        response.raise_for_status()
+        return response.text.strip()
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error fetching OpenHAB item '{item_name}': {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching OpenHAB item '{item_name}': {e}")
+        return None
+
+# General HTTP retry decorator for third-party services (weather, etc.)
+def general_http_retry(func):
+    """Decorator with basic retry logic for third-party HTTP calls"""
+    @http_retry
+    async def wrapper(*args, **kwargs):
+        # No semaphore for general services to avoid blocking critical operations
+        return await func(*args, **kwargs)
+    return wrapper
+
+# Timing decorator for performance monitoring
+def time_execution(operation_name: str = None):
+    """Decorator to time function execution and log slow operations"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            op_name = operation_name or func.__name__
+            start_time = time.time()
+            try:
+                result = await func(*args, **kwargs)
+                execution_time = time.time() - start_time
+                if execution_time > 0.1:  # Log operations taking more than 100ms
+                    logger.warning(f"⏱️ Slow operation: {op_name} took {execution_time:.3f}s")
+                elif execution_time > 0.05:  # Debug log for operations > 50ms
+                    logger.debug(f"⏱️ {op_name} took {execution_time:.3f}s")
+                return result
+            except Exception as e:
+                execution_time = time.time() - start_time
+                logger.error(f"⏱️ Failed operation: {op_name} took {execution_time:.3f}s before failing: {e}")
+                raise
+        return wrapper
+    return decorator
 
 websocket_retry = retry(
     reraise=True,
@@ -1108,8 +1133,11 @@ async def periodic_informational_messages():
             
             if message_choice < 0.5:  # 50% chance - weather information
                 try:
-                    # Get weather data from the weather service
-                    weather_response = await http_client.get('http://192.168.1.161:5000/get_received_data')
+                    # Get weather data from the weather service with timeout protection
+                    weather_response = await asyncio.wait_for(
+                        http_client.get('http://192.168.1.161:5000/get_received_data'),
+                        timeout=3.0  # Short timeout for weather service
+                    )
                     weather_response.raise_for_status()
                     weather_data = weather_response.json()
                     
@@ -1169,11 +1197,6 @@ async def periodic_informational_messages():
                 message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "interface_info", relays=RELAYS)
                 await messaging.send_to_websocket_clients(message)
 
-# LNbits splits functionality removed - using direct zap payments only
-
-@http_retry
-# LNbits splits functionality removed - using direct zap payments only
-
 @lnbits_http_retry
 async def get_balance(force_refresh=False):
     """
@@ -1222,7 +1245,7 @@ async def get_balance(force_refresh=False):
         
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@http_retry
+@lnbits_http_retry
 async def get_lnbits_fee_settings():
     """
     Get current LNbits fee and reserve settings from the admin API.
@@ -1266,7 +1289,7 @@ async def get_lnbits_fee_settings():
         logger.warning(f"Error getting LNbits fee settings: {e} - using fallback")
         return None
 
-@http_retry
+@lnbits_http_retry
 async def get_fee_reserve_for_amount(amount_msat: int):
     """
     Get fee reserve calculation from LNbits for a specific amount.
@@ -1481,16 +1504,22 @@ async def calculate_max_payment_amount(total_amount_sats: int, num_payments: int
         logger.debug(f"📊 Emergency fallback: {fallback_amount} sats (reserved {fallback_fees} sats)")
         return fallback_amount
 
-@http_retry
+@lnbits_http_retry
 async def fetch_cyberherd_targets():
-    url = f'{config["LNBITS_URL"]}/splitpayments/api/v1/targets'
-    headers = {
-        'accept': 'application/json',
-        'X-API-KEY': config['CYBERHERD_KEY']
-    }
-    response = await http_client.get(url, headers=headers)
-    response.raise_for_status()
-    return response.json()
+    try:
+        logger.debug("→ Calling fetch_cyberherd_targets")
+        url = f'{config["LNBITS_URL"]}/splitpayments/api/v1/targets'
+        headers = {
+            'accept': 'application/json',
+            'X-API-KEY': config['CYBERHERD_KEY']
+        }
+        response = await http_client.get(url, headers=headers)
+        response.raise_for_status()
+        logger.debug("← fetch_cyberherd_targets returned")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Error fetching cyberherd targets: {e}")
+        raise
 
 @http_retry
 async def create_cyberherd_targets(new_targets_data, initial_targets):
@@ -1556,28 +1585,40 @@ async def create_cyberherd_targets(new_targets_data, initial_targets):
                 for i in range(int(leftover)):
                     sorted_wallets[i % len(sorted_wallets)]['percent'] += 1
 
-        targets_list = [predefined_wallet] + combined_wallets
+        if not combined_wallets:
+            # If there are no other members, the predefined wallet gets 100%
+            predefined_wallet['percent'] = 100
+            targets_list = [predefined_wallet]
+        else:
+            # If there are members, use the 90/10 split logic
+            predefined_wallet['percent'] = 90
+            # ... (existing logic for distributing the remaining 10%) ...
+            targets_list = [predefined_wallet] + combined_wallets
+            
         return {"targets": targets_list}
 
     except Exception as e:
         logger.error(f"Error creating cyberherd targets: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-async def update_split_targets_from_herd():
+@time_execution("split_targets_update")
+async def update_split_targets_from_herd(force_update: bool = False): # Add new parameter
     """
-    Update LNbits split payment targets based on current CyberHerd members' payouts.
-    This should be called whenever payouts change for any member.
+    Update LNbits split payment targets based on current ACTIVE CyberHerd members' payouts.
     """
+    # --- Start of modified rate-limiting block ---
+    cache_key = "last_split_targets_update"
+    last_update_time = await cache.get(cache_key, 0)
+    current_time = time.time()
+    
+    if not force_update and (current_time - last_update_time < 3): # Using the 3-second delay
+        logger.debug(f"Split targets update rate-limited (last update {current_time - last_update_time:.1f}s ago)")
+        return
+    
     try:
-        # Get all current herd members with their payouts
-        query = "SELECT lud16, display_name, payouts FROM cyber_herd WHERE lud16 IS NOT NULL AND lud16 != ''"
+        query = "SELECT lud16, display_name, payouts FROM cyber_herd WHERE lud16 IS NOT NULL AND lud16 != '' AND is_active = 1"
         herd_members = await database.fetch_all(query)
-        
-        if not herd_members:
-            logger.info("No CyberHerd members with Lightning addresses found")
-            return
-        
-        # Convert herd members to targets format for create_cyberherd_targets
+
         new_targets_data = []
         for member in herd_members:
             member_dict = dict(member)
@@ -1586,21 +1627,22 @@ async def update_split_targets_from_herd():
                 'alias': member_dict['display_name'] or 'Unknown',
                 'payouts': float(member_dict['payouts']) if member_dict['payouts'] else 1.0
             })
-        
-        # Create the targets with proper distribution
+
         targets_data = await create_cyberherd_targets(new_targets_data, [])
-        
-        # Update the split payment targets - send the full dict as LNbits expects
         await update_cyberherd_targets(targets_data)
         
-        logger.info(f"✅ Updated split payment targets for {len(new_targets_data)} CyberHerd members")
+        # This final part of the rate limiter is crucial: update the cache time
+        await cache.set(cache_key, current_time, ttl=60)
         
+        if not herd_members:
+            logger.info("Set split payment target to predefined wallet (100%) as no members are active.")
+        else:
+            logger.info(f"Updated split payment targets for {len(new_targets_data)} active CyberHerd members.")
+
     except Exception as e:
         logger.error(f"Error updating split targets from herd: {e}")
-        # Don't raise the exception to avoid breaking the main flow
-        # The split payment update is supplementary to the core functionality
-
-@http_retry
+        
+@lnbits_http_retry
 async def update_cyberherd_targets(targets):
     try:
         url = f'{config["LNBITS_URL"]}/splitpayments/api/v1/targets'
@@ -1610,12 +1652,15 @@ async def update_cyberherd_targets(targets):
             'Content-Type': 'application/json'
         }
         
-        # Log the data being sent for debugging the 400 error
-        logger.info(f"📤 Updating LNbits targets: {targets}")
-        logger.info(f"📤 Data type: {type(targets)}, Length: {len(targets) if isinstance(targets, list) else 'N/A'}")
+        logger.debug("→ Calling update_cyberherd_targets")
+        
+        # CHANGED: This verbose log is now DEBUG level.
+        logger.debug(f"Updating LNbits targets with data: {targets}")
         
         data = json.dumps(targets)
         response = await http_client.put(url, headers=headers, content=data)
+        
+        logger.debug("← update_cyberherd_targets returned")
         
         # Log response details for 400 errors
         if response.status_code != 200:
@@ -1638,6 +1683,7 @@ async def update_cyberherd_targets(targets):
 @lnbits_http_retry
 async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KEY']):
     try:
+        logger.debug("→ Calling create_invoice")
         url = f"{config['LNBITS_URL']}/api/v1/payments"
         headers = {
             "X-API-KEY": key,
@@ -1651,6 +1697,7 @@ async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KE
         }
         response = await http_client.post(url, json=data, headers=headers)
         response.raise_for_status()
+        logger.debug("← create_invoice returned")
         return response.json().get('bolt11')  # Return the BOLT11 invoice
     except httpx.HTTPError as e:
         logger.error(f"HTTP error creating invoice: {e}")
@@ -1659,9 +1706,10 @@ async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KE
         logger.error(f"Error creating invoice: {e}")
         raise
 
-@http_retry
+@lnbits_http_retry
 async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
     try:
+        logger.debug("→ Calling pay_invoice")
         url = f"{config['LNBITS_URL']}/api/v1/payments"
         headers = {
             "X-API-KEY": key,
@@ -1674,6 +1722,7 @@ async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
         }
         response = await http_client.post(url, json=data, headers=headers)
         response.raise_for_status()
+        logger.debug("← pay_invoice returned")
         return response.json()  # Return the payment response
     except httpx.HTTPError as e:
         logger.error(f"HTTP error paying invoice: {e}")
@@ -1687,17 +1736,29 @@ async def send_split_payment(balance: int):
     """Send payment to CyberHerd split wallet using invoice creation and payment."""
     memo = 'CyberHerd Distribution'
     try:
-        # Create invoice with the CyberHerd (splits) wallet
-        payment_request = await create_invoice(balance, memo, config['CYBERHERD_KEY'])
+        # CHANGED: This log message was changed from INFO to DEBUG.
+        logger.debug(f"→ Calling send_split_payment for {balance} sats")
+
+        # Add timeout protection for the entire payment process
+        async with asyncio.timeout(10.0):  # 10 second timeout for payment operations
+            # Create invoice with the CyberHerd (splits) wallet
+            payment_request = await create_invoice(balance, memo, config['CYBERHERD_KEY'])
+            
+            # Small delay to prevent potential deadlock between invoice creation and payment
+            await asyncio.sleep(0.5)
+            
+            # Pay the invoice from the main wallet
+            payment_status = await pay_invoice(payment_request, config['HERD_KEY'])
         
-        # Small delay to prevent potential deadlock between invoice creation and payment
-        await asyncio.sleep(0.5)
-        
-        # Pay the invoice from the main wallet
-        payment_status = await pay_invoice(payment_request, config['HERD_KEY'])
+        # CHANGED: This log message was changed from INFO to DEBUG.
+        logger.debug(f"← send_split_payment returned success for {balance} sats")
         
         logger.info(f"✅ Split payment successful: {balance} sats sent to CyberHerd wallet")
         return {"success": True, "data": payment_status}
+    except asyncio.TimeoutError:
+        error_msg = f"Split payment timed out after 10 seconds for {balance} sats"
+        logger.error(error_msg)
+        return {"success": False, "message": error_msg}
     except HTTPException as e:
         logger.error(f"Failed to send split payment: {e.detail}")
         return {"success": False, "message": f"Failed to send split payment: {e.detail}"}
@@ -1705,25 +1766,37 @@ async def send_split_payment(balance: int):
         logger.error(f"Failed to send split payment: {e}")
         return {"success": False, "message": f"Failed to send split payment: {str(e)}"}
 
-@http_retry
-async def fetch_btc_price():
+@app.get("/openhab/bitcoin_data", response_model=BitcoinData)
+async def get_bitcoin_data():
+    """Endpoint to get BTC price and 24h change from OpenHAB."""
     try:
-        response = await http_client.get(
-            f'{config["OPENHAB_URL"]}/rest/items/BTC_Price_Output/state',
-            auth=(config['OH_AUTH_1'], '')
+        # Fetch both items concurrently for better performance.
+        price_state, change_state = await asyncio.gather(
+            get_openhab_item_state("BTC_USD_Price"),
+            get_openhab_item_state("BTC_Price_24h_PercentChange")
         )
-        response.raise_for_status()
-        btc_price = float(response.text)
-        return btc_price
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error fetching BTC price: {e}")
-        raise HTTPException(
-            status_code=e.response.status_code if e.response else 500,
-            detail="Failed to fetch BTC price"
+
+        price = None
+        if price_state and price_state not in ["NULL", "UNDEF"]:
+            try:
+                price = float(price_state)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert BTC_USD_Price state '{price_state}' to float.")
+
+        change = None
+        if change_state and change_state not in ["NULL", "UNDEF"]:
+            try:
+                change = float(change_state)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not convert BTC_Price_24h_PercentChange state '{change_state}' to float.")
+
+        return BitcoinData(
+            btc_usd_price=price,
+            btc_price_24h_percent_change=change
         )
     except Exception as e:
-        logger.error(f"Error fetching BTC price: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        logger.error(f"An unexpected error occurred in get_bitcoin_data: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve bitcoin data from OpenHAB.")
 
 def encode_lnurl(lightning_address: str) -> str:
     """
@@ -1780,54 +1853,6 @@ def encode_lnurl(lightning_address: str) -> str:
         return ""
 
 @http_retry
-async def create_invoice(amount: int, memo: str, key: str = config['CYBERHERD_KEY']):
-    try:
-        url = f"{config['LNBITS_URL']}/api/v1/payments"
-        headers = {
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
-        data = {
-            "out": False,
-            "amount": amount,
-            "unit": "sat",
-            "memo": memo
-        }
-        response = await http_client.post(url, json=data, headers=headers)
-        response.raise_for_status()
-        response_data = response.json()
-        return response_data.get('bolt11')
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error creating invoice: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error creating invoice: {e}")
-        raise
-
-@http_retry
-async def pay_invoice(payment_request: str, key: str = config['HERD_KEY']):
-    try:
-        url = f"{config['LNBITS_URL']}/api/v1/payments"
-        headers = {
-            "X-API-KEY": key,
-            "Content-Type": "application/json"
-        }
-        data = {
-            "out": True,
-            "unit": "sat",
-            "bolt11": payment_request
-        }
-        response = await http_client.post(url, json=data, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error paying invoice: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error paying invoice: {e}")
-        raise
-
-@http_retry
 class ZapMessageGenerator:
     """Enhanced zap message generator with context-aware messages."""
     
@@ -1861,35 +1886,7 @@ class ZapMessageGenerator:
         )
         return message
 
-async def enhanced_zap_lud16(
-    lud16: str, 
-    sats: int, 
-    text: str = None,
-    context: str = "regular",
-    display_name: str = "member"
-) -> dict:
-    """
-    Simplified LNURL payment function for CyberHerd distributions.
-    Uses only simple LNURL payments without complex Nostr zap functionality.
-    
-    Args:
-        lud16: Lightning address
-        sats: Amount in sats
-        text: Custom message (optional)
-        context: Message context for generation
-        display_name: Display name for personalized messages
-    
-    Returns:
-        Result dictionary with payment status
-    """
-    msat_amount = sats * 1000
-    
-    # Generate contextual message if none provided
-    if text is None:
-        text = await ZapMessageGenerator.get_feeding_message(sats, display_name, context)
-    
-    start_time = time.time()
-@http_retry
+@openhab_http_retry
 async def is_feeder_override_enabled():
     try:
         response = await http_client.get(
@@ -1908,7 +1905,7 @@ async def is_feeder_override_enabled():
         logger.error(f"Error checking feeder status: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@http_retry
+@openhab_http_retry
 async def trigger_feeder():
     try:
         feeder_trigger_response = await http_client.post(
@@ -1931,104 +1928,6 @@ async def trigger_feeder():
     except Exception as e:
         logger.error(f"Error triggering the feeder and GoatFeedingsIncrement rule: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-        
-@http_retry
-async def get_goat_feedings():
-    try:
-        auth = (config['OH_AUTH_1'], '')
-        headers = {"accept": "text/plain"}
-        get_url = f"{config['OPENHAB_URL']}/rest/items/GoatFeedings/state"
-        response = await http_client.get(get_url, headers=headers, auth=auth)
-        response.raise_for_status()
-
-        try:
-            feedings = int(response.text.strip())
-        except Exception as e:
-            logger.warning(f"Failed to parse GoatFeedings state '{response.text.strip()}': {e}. Defaulting to 0.")
-            feedings = 0
-
-        logger.info(f"Returning latest GoatFeedings state: {feedings}")
-        return feedings
-
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error retrieving GoatFeedings state from OpenHAB: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch GoatFeedings state from OpenHAB")
-    except Exception as e:
-        logger.error(f"Unexpected error retrieving GoatFeedings state: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error retrieving GoatFeedings state")
-      
-@http_retry
-async def get_goat_sats_sum_today():
-    """Get GoatSats state, preferring cached value if available."""
-    try:
-        # Try to get from cache first
-        cached_state = await cache.get("goat_sats_state")
-        if cached_state is not None:
-            logger.debug("Using cached GoatSats state")
-            return {"sum_goat_sats": cached_state}
-
-        # If not in cache, fetch from OpenHAB
-        auth = (config['OH_AUTH_1'], '')
-        headers = {"accept": "text/plain"}
-        get_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
-        response = await http_client.get(get_url, headers=headers, auth=auth)
-        response.raise_for_status()
-        
-        try:
-            latest_state = int(float(response.text.strip()))
-            # Cache the result without TTL
-            await cache.set("goat_sats_state", latest_state)
-            logger.info(f"Updated cached GoatSats state to: {latest_state}")
-            return {"sum_goat_sats": latest_state}
-        except Exception as e:
-            logger.warning(f"Failed to parse GoatSats state '{response.text.strip()}': {e}. Defaulting to 0.")
-            return {"sum_goat_sats": 0}
-    
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error retrieving GoatSats state from OpenHAB: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch GoatSats state from OpenHAB")
-    except Exception as e:
-        logger.error(f"Unexpected error retrieving GoatSats state: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error retrieving GoatFeedings state")
-
-@http_retry
-async def update_goat_sats(sats_received: int):
-    """Update GoatSats state in both cache and OpenHAB with race condition protection."""
-    try:
-        # Use a lock to prevent concurrent updates from causing inconsistencies
-        async with app_state.lock:
-            # Get current state (preferring cache)
-            current_state_data = await get_goat_sats_sum_today()
-            current_state = current_state_data["sum_goat_sats"]
-            new_state = current_state + sats_received
-            
-            # Update OpenHAB
-            auth = (config['OH_AUTH_1'], '')
-            headers = {
-                "accept": "application/json",
-                "Content-Type": "text/plain"
-            }
-            put_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
-            put_response = await http_client.put(put_url, headers=headers, auth=auth, content=str(new_state))
-            put_response.raise_for_status()
-            
-            # Update cache without TTL - both operations under same lock
-            await cache.set("goat_sats_state", new_state)
-            logger.info(f"Updated GoatSats state to {new_state} (cache + OpenHAB)")
-    
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error updating GoatSats in OpenHAB: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error updating GoatSats: {e}")
-
-async def safe_balance_sync(force_refresh: bool = False):
-    """
-    DEPRECATED: WebSocket-only balance management eliminates need for HTTP sync.
-    WebSocket payments include wallet_balance field which provides accurate, real-time balance.
-    This function is now a no-op to maintain compatibility.
-    """
-    logger.debug("Balance sync skipped - using WebSocket-only balance updates")
-    return
 
 # Payment processing metrics tracking
 class PaymentMetrics:
@@ -2173,63 +2072,146 @@ class PaymentMetrics:
 
 payment_metrics = PaymentMetrics()
 
-async def process_cyberherd_zap_from_payment(payment_data: dict, zap_request: dict):
+# -----------------------------------------------------------------------------
+# CyberHerd extension integration helpers (settings-driven delegation)
+# -----------------------------------------------------------------------------
+_cyberherd_settings_cache: Dict[str, Any] = {"ts": 0, "data": None}
+
+async def _fetch_cyberherd_settings() -> dict:
+    """Fetch CyberHerd extension settings from LNbits using SAT_KEY.
+    Cached for 10 seconds to avoid hammering the endpoint.
     """
-    Process CyberHerd zap directly from payment data.
-    Extracts zap information and processes it through the cyber_herd logic.
+    global _cyberherd_settings_cache
+    now = time.time()
+    if _cyberherd_settings_cache["data"] and (now - _cyberherd_settings_cache["ts"] < 10):
+        return _cyberherd_settings_cache["data"]
+    url = f"{config['LNBITS_URL']}/cyberherd/api/v1/settings"
+    headers = {"X-API-KEY": config.get('SAT_KEY', ''), "Accept": "application/json"}
+    try:
+        resp = await http_client.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
+        _cyberherd_settings_cache = {"ts": now, "data": data}
+        return data
+    except Exception as e:
+        logger.error(f"Failed to fetch cyberherd settings: {e}")
+        return {}
+
+async def is_zap_tracking_disabled() -> bool:
+    """Return True when zap tracking is disabled in the CyberHerd extension settings.
+    In that case we bypass local zap processing and use the extension's member endpoint.
+    Default: assume tracking is enabled (return False) on error to preserve existing behavior.
+    """
+    settings = await _fetch_cyberherd_settings()
+    # Settings schema expected: { "zap_tracking_enabled": bool }
+    return settings.get('zap_tracking_enabled', True) is False
+
+async def process_cyberherd_member_via_extension(payment_data: dict, zap_request: dict):
+    """Process cyberherd member using LNbits extension endpoints instead of local logic.
+    If it fails, fall back to local background logic.
+    Flow:
+      1. Extract pubkey from zap_request
+      2. POST/PUT (idempotent) to /cyberherd/api/v1/members/{pubkey}
+      3. Record payment metrics accordingly
     """
     try:
-        import messaging
-        
-        # Extract payment information
+        pubkey = zap_request.get('pubkey')
+        if not pubkey:
+            logger.warning("Zap request missing pubkey; cannot use extension flow.")
+            return
+        endpoint = f"{config['LNBITS_URL']}/cyberherd/api/v1/members/{pubkey}"
+        headers = {"X-API-KEY": config.get('SAT_KEY', ''), "Content-Type": "application/json", "Accept": "application/json"}
+        # Compose minimal payload; include amount if present
+        payment = payment_data.get('payment', {})
+        amount_msat = payment.get('amount', 0)
+        amount_sats = max(0, amount_msat // 1000)
+        payload = {"amount": amount_sats, "zap_request": zap_request}
+        logger.debug(f"Delegating cyberherd member processing to extension for {pubkey} with {amount_sats} sats")
+        resp = await http_client.post(endpoint, headers=headers, json=payload)
+        if resp.status_code not in (200, 201):
+            logger.warning(f"Extension member endpoint returned {resp.status_code}: {resp.text}; falling back to local logic")
+            raise HTTPException(status_code=resp.status_code, detail="Extension member endpoint failure")
+        result_json = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
+        if result_json.get('processed') is True:
+            logger.info(f"Extension processed cyberherd zap for {pubkey} successfully.")
+        else:
+            logger.info(f"Extension did not process zap for {pubkey}; recorded as regular payment.")
+    except Exception as e:
+        logger.error(f"Extension processing failed: {e}; reverting to local background handler.")
+        # Fallback to original local background logic
+        try:
+            asyncio.create_task(handle_cyberherd_logic_background(payment_data, zap_request))
+        except Exception as inner:
+            logger.error(f"Failed fallback to local background logic: {inner}")
+
+async def process_cyberherd_zap_from_payment(payment_data: dict, zap_request: dict):
+    """
+    Process CyberHerd zap, prioritizing local DB for metadata to reduce network calls.
+    It fetches user data from the local database first and only performs a network
+    lookup for new users.
+    """
+    try:
+        # --- Extract payment and zap info (no changes here) ---
         payment = payment_data.get('payment', {})
         amount_msat = payment.get('amount', 0)
         amount_sats = amount_msat // 1000
-        
-        # Extract zap request information
         zapper_pubkey = zap_request.get('pubkey', '')
         event_id = ''
-        
-        # Find the event being zapped
         for tag in zap_request.get('tags', []):
             if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'e':
                 event_id = tag[1]
                 break
-        
         if not event_id or not zapper_pubkey:
             logger.error("Missing event_id or zapper_pubkey in CyberHerd zap")
             return
-        
-        # Get zap receipt ID from the zap request itself (not the payment description)
-        # The zap_request parameter should contain the actual zap request event
         zap_receipt_id = zap_request.get('id', '')
-        
         if not zap_receipt_id:
             logger.error("Missing zap receipt ID from zap request")
             return
+
+        member_record = None
+        user_metadata = {}
+
+        # 1. Query the local database for the existing member
+        query = "SELECT * FROM cyber_herd WHERE pubkey = :pubkey"
+        member_record_raw = await database.fetch_one(query, values={"pubkey": zapper_pubkey})
         
-        # Fetch user metadata using existing cyberherd module
-        from utils.cyberherd_module import MetadataFetcher, generate_nprofile
-        
-        metadata_fetcher = MetadataFetcher()
-        user_metadata = await metadata_fetcher.lookup_metadata(zapper_pubkey, RELAYS)
-        
-        if not user_metadata:
-            logger.error(f"Failed to fetch metadata for pubkey {zapper_pubkey}")
-            return
-        
-        # Extract user information
-        display_name = user_metadata.get('display_name') or user_metadata.get('name', 'Anon')
-        lud16 = user_metadata.get('lud16', '')
-        picture = user_metadata.get('picture', '')
-        
+        # Convert the Record object to a dictionary if it exists
+        member_record = dict(member_record_raw) if member_record_raw else None
+
+        if member_record:
+            logger.info(f"✅ Found existing member {member_record['display_name']} in local DB. Skipping network lookup.")
+            # 2. Populate metadata directly from the database record
+            user_metadata = {
+                'display_name': member_record.get('display_name', 'Anon'),
+                'lud16': member_record.get('lud16'),
+                'picture': member_record.get('picture', ''),
+                'nprofile': member_record.get('nprofile'),
+                # Relays are stored as a JSON string, so they must be decoded
+                'relays': json.loads(member_record.get('relays', '[]'))
+            }
+        else:
+            # 3. Fallback to network lookup ONLY for new users
+            logger.info(f"New member {zapper_pubkey[:10]}... Performing network metadata lookup.")
+            metadata_fetcher = MetadataFetcher()
+            fetched_metadata = await metadata_fetcher.lookup_metadata(zapper_pubkey, RELAYS)
+
+            if not fetched_metadata:
+                logger.error(f"Failed to fetch metadata for new pubkey {zapper_pubkey}")
+                return
+
+            user_metadata = fetched_metadata
+            user_metadata['nprofile'] = await generate_nprofile(zapper_pubkey)
+            user_metadata['relays'] = await lookup_relay_list(zapper_pubkey, RELAYS)
+
+        # --- Proceed with validated metadata ---
+        display_name = user_metadata.get('display_name', 'Anon')
+        lud16 = user_metadata.get('lud16')
+
         if not lud16:
-            logger.error(f"User {display_name} has no Lightning address (lud16)")
+            logger.error(f"User {display_name} has no Lightning address (lud16). Cannot process.")
             return
-        
-        # Generate nprofile
-        nprofile = await generate_nprofile(zapper_pubkey)
-        
+
         # Create CyberHerdData object
         cyberherd_data = CyberHerdData(
             display_name=display_name,
@@ -2237,103 +2219,112 @@ async def process_cyberherd_zap_from_payment(payment_data: dict, zap_request: di
             note=zap_receipt_id,
             kinds=[9735],
             pubkey=zapper_pubkey,
-            nprofile=nprofile,
+            nprofile=user_metadata.get('nprofile', ''),
             lud16=lud16,
             amount=amount_sats,
-            picture=picture,
-            relays=RELAYS[:2]
+            picture=user_metadata.get('picture', ''),
+            relays=user_metadata.get('relays') or RELAYS[:2]
         )
-        
-        logger.info(f"🎯 Processing CyberHerd zap from payment: {amount_sats} sats from {display_name}")
-        
-        # Process through the existing cyber_herd logic
-        await process_single_cyberherd_item(cyberherd_data)
-        
-    except Exception as e:
-        logger.error(f"Error processing CyberHerd zap from payment: {e}", exc_info=True)
 
-async def process_single_cyberherd_item(item: CyberHerdData, skip_duplicate_check: bool = False):
+        logger.info(f"🎯 Processing CyberHerd zap via optimized flow: {amount_sats} sats from {display_name}")
+
+        # Process through the logic, passing the fetched record to avoid a second DB lookup
+        await process_single_cyberherd_item(cyberherd_data, existing_member_record=member_record)
+
+    except Exception as e:
+        logger.error(f"Error in process_cyberherd_zap_from_payment: {e}", exc_info=True)
+
+async def process_single_cyberherd_item(
+    item: CyberHerdData,
+    skip_duplicate_check: bool = False,
+    existing_member_record: Optional[dict] = None
+):
     """
-    Process a single CyberHerd item through the existing logic.
-    This mirrors the main cyber_herd endpoint logic but for a single item.
+    Process a single CyberHerd item, enforcing MAX_HERD_SIZE for all new activations.
     
     Args:
         item: CyberHerd data to process
-        skip_duplicate_check: If True, skips the duplicate zap check (used for recovery scenarios)
+        skip_duplicate_check: If True, skips duplicate zap check (for recovery)
+        existing_member_record: Pre-fetched database record of the member to avoid a query.
     """
     async with database.transaction():
         try:
             import messaging
             
-            query = "SELECT COUNT(*) as count FROM cyber_herd"
-            result = await database.fetch_one(query)
-            current_herd_size = result['count']
-
             members_to_notify = []
             unprocessed_items = []
 
             item_dict = item.dict()
             pubkey = item_dict['pubkey']
             note_id = item_dict.get('note')
-            event_id = item_dict.get('event_id')
-            
-            logger.info(f"🔍 Processing zap - pubkey: {pubkey[:16]}..., note: {note_id}, event_id: {event_id}, amount: {item_dict.get('amount', 0)}")
 
+            # --- Duplicate Zap Prevention ---
             should_process = True
             if note_id and not skip_duplicate_check:
-                # Check if this zap should be processed (atomic duplicate prevention)
-                logger.info(f"🔍 Checking if zap {note_id} from {pubkey[:16]}... should be processed")
+                logger.debug(f"Checking if zap {note_id} from {pubkey[:16]}... should be processed")
                 should_process = await mark_zap_event_processing(note_id, pubkey, item_dict.get('event_id', ''), item_dict.get('amount', 0), database)
                 if not should_process:
-                    logger.info(f"DUPLICATE ZAP PREVENTED: Zap event {note_id} from {pubkey} already being processed or processed, skipping.")
+                    logger.info(f"DUPLICATE ZAP PREVENTED: Zap event {note_id} from {pubkey} already processed or processing.")
                     return
                 else:
-                    logger.info(f"✅ Zap {note_id} marked for processing")
-            elif skip_duplicate_check:
-                logger.info(f"✅ Skipping duplicate check for recovery - zap {note_id} from {pubkey[:16]}... already claimed")
-
+                    logger.debug(f"Zap {note_id} marked for processing")
+            
             try:
-                check_query = "SELECT * FROM cyber_herd WHERE pubkey = :pubkey"
-                member_record = await database.fetch_one(check_query, values={"pubkey": pubkey})
+                # --- Fetch member record and current herd size FIRST ---
+                member_record = existing_member_record
+                if member_record is None:
+                    check_query = "SELECT * FROM cyber_herd WHERE pubkey = :pubkey"
+                    member_record_raw = await database.fetch_one(check_query, values={"pubkey": pubkey})
+                    member_record = dict(member_record_raw) if member_record_raw else None
+
                 is_existing_member = member_record is not None
+                is_already_active = is_existing_member and member_record.get('is_active') == 1
 
-                if is_existing_member:
+                count_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE is_active = 1"
+                result = await database.fetch_one(count_query)
+                current_herd_size = result['count']
+
+                # Condition 1: Member is already active. Update them regardless of herd size, as it doesn't change the count.
+                if is_already_active:
+                    logger.info(f"Processing cumulative zap for already active member: {member_record['display_name']}")
                     await process_existing_member(item_dict, item, member_record, members_to_notify)
-                elif not is_existing_member and current_herd_size < MAX_HERD_SIZE:
-                    await process_new_member(item_dict, members_to_notify)
-                    current_herd_size += 1
-                elif not is_existing_member:
-                    logger.info(f"🥊 Adding to headbutt queue (herd full)")
-                    unprocessed_items.append(item)
 
+                # Condition 2: The herd has space. New members can join or inactive members can be activated.
+                elif current_herd_size < MAX_HERD_SIZE:
+                    if is_existing_member:  # Inactive member becoming active
+                        logger.info(f"Activating existing (but inactive) member {member_record['display_name']} as herd has space.")
+                        await process_existing_member(item_dict, item, member_record, members_to_notify)
+                    else:  # New member joining
+                        logger.info(f"Adding new member {item_dict['display_name']} as herd has space.")
+                        await process_new_member(item_dict, members_to_notify)
+
+                # Condition 3: The herd is full. All other zaps result in headbutts.
+                else:  # current_herd_size >= MAX_HERD_SIZE
+                    if is_existing_member:  # Inactive member trying to activate
+                        logger.info(f"🥊 Herd is full. Inactive member {member_record['display_name']}'s zap triggers a headbutt attempt.")
+                    else:  # New member trying to join
+                        logger.info(f"🥊 Herd is full. New member {item_dict['display_name']}'s zap triggers a headbutt attempt.")
+                    unprocessed_items.append(item)
+                
                 if note_id and not skip_duplicate_check:
                     await mark_zap_event_completed(note_id, database)
-                elif note_id and skip_duplicate_check:
-                    # For recovery scenarios, the completion is handled by the recovery process
-                    logger.debug(f"✅ Zap {note_id} completion will be handled by recovery process")
 
             except Exception as e:
                 logger.error(f"Error processing item for {pubkey}: {e}")
                 if note_id and not skip_duplicate_check:
                     await mark_zap_event_failed(note_id, str(e), database)
-                elif note_id and skip_duplicate_check:
-                    # For recovery scenarios, failure handling is done by the recovery process
-                    logger.debug(f"❌ Zap {note_id} failure will be handled by recovery process")
                 return
 
-            # Handle headbutting if needed
             if unprocessed_items:
-                logger.info(f"Herd full: {current_herd_size} members - attempting headbutting with {len(unprocessed_items)} candidates.")
-                await headbutt_service.process_headbutting_attempts(unprocessed_items)
-                # Update split payment targets after headbutting since herd composition may have changed
-                await update_split_targets_from_herd()
+                successful_headbutts = await headbutt_service.process_headbutting_attempts(unprocessed_items)
+                if successful_headbutts:
+                    await update_split_targets_from_herd()
             
             await update_system_balance()
             difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
 
             if members_to_notify:
-                # Get current herd size for notifications
-                final_herd_count_query = "SELECT COUNT(*) as count FROM cyber_herd"
+                final_herd_count_query = "SELECT COUNT(*) as count FROM cyber_herd WHERE is_active = 1"
                 final_count_result = await database.fetch_one(final_herd_count_query)
                 final_herd_count = final_count_result['count'] if final_count_result else 0
                 await process_notifications(members_to_notify, difference, final_herd_count)
@@ -2341,6 +2332,67 @@ async def process_single_cyberherd_item(item: CyberHerdData, skip_duplicate_chec
         except Exception as e:
             logger.error(f"Failed to process CyberHerd item: {e}", exc_info=True)
             raise
+            
+async def _find_cyberherd_zap_request(payment_data: dict) -> Optional[dict]:
+    """
+    Consolidated logic to find a potential CyberHerd zap request from payment data.
+    Checks description and extra['nostr'] fields.
+    """
+    payment = payment_data.get('payment', {})
+    
+    # Source 1: Check 'description' field for a zap receipt
+    description = payment.get('description', '')
+    if description:
+        try:
+            zap_receipt = json.loads(description)
+            if zap_receipt.get('kind') == 9735:
+                for tag in zap_receipt.get('tags', []):
+                    if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'description':
+                        return json.loads(tag[1])
+        except (json.JSONDecodeError, IndexError):
+            pass  # Not a valid zap receipt, continue to next source
+
+    # Source 2: Check 'extra' field for nostr data
+    extra = payment.get('extra', {})
+    if extra and 'nostr' in extra:
+        try:
+            nostr_data = extra['nostr']
+            zap_request = json.loads(nostr_data) if isinstance(nostr_data, str) else nostr_data
+            if zap_request.get('kind') == 9734:
+                return zap_request
+        except (json.JSONDecodeError, KeyError, TypeError, IndexError):
+            pass # Not a valid zap request
+
+    return None
+
+async def handle_feeder_payout_and_messaging(payment_amount: int, sats_received: int):
+    """
+    Background task to handle CyberHerd payouts and notifications after feeder trigger.
+    """
+    try:
+        logger.info(f"Starting background task for feeder payout of {payment_amount} sats.")
+
+        logger.info("Forcing synchronization of LNbits splits before payout to ensure accuracy.")
+        await update_split_targets_from_herd(force_update=True)
+
+        # Send message
+        feeder_msg, _ = await messaging.make_messages(config['NOS_SEC'], sats_received, 0, "feeder_triggered")
+        await messaging.send_to_websocket_clients(feeder_msg)
+        logger.info("✅ Feeder triggered message sent to clients.")
+
+        # Pay CyberHerd
+        payment_result = await pay_cyberherd_members_with_splits(payment_amount)
+
+        if payment_result['success']:
+            logger.info(f"✅ Background CyberHerd payment successful.")
+            async with app_state.lock:
+                app_state.balance = 0
+                app_state.last_balance_update = time.time()
+        else:
+            logger.error(f"❌ Background CyberHerd payment failed: {payment_result.get('error', 'Unknown error')}")
+
+    except Exception as e:
+        logger.error(f"Error in background feeder payout task: {e}", exc_info=True)
 
 @retry(
     reraise=True,
@@ -2348,193 +2400,124 @@ async def process_single_cyberherd_item(item: CyberHerdData, skip_duplicate_chec
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(Exception)
 )
+
+@time_execution("payment_processing")
 async def process_payment_data(payment_data):
     """
-    Processes incoming payment data from WebSocket.
-    This function handles general payments. CyberHerd zaps are detected and
-    processed directly within this function via process_cyberherd_zap_from_payment().
+    Processes incoming payment data from WebSocket. This function is optimized for speed
+    by deferring slow I/O operations to background tasks.
     """
     feeder_triggered = False
-    is_cyberherd = False
     
+    # 1. Quickly find zap request without I/O
+    zap_request = await _find_cyberherd_zap_request(payment_data)
+
+    # Decide dynamically whether to use local background processing or delegate to LNbits extension
+    if zap_request:
+        asyncio.create_task(handle_cyberherd_logic_background(payment_data, zap_request))
+
+    # 2. Common Payment Processing (for ALL payments) - this part is fast
+    payment = payment_data.get('payment', {})
+    payment_amount = payment.get('amount', 0)
+    sats_received = payment_amount // 1000
+    
+    # We only log this now, as the detailed processing happens elsewhere
+    if sats_received > 0:
+        logger.info(f"Processing payment of {sats_received} sats. (Detailed processing in background if zap)")
+
+    # 3. Feeder Override Check (fast, local network call)
+    override_enabled = False
+    if sats_received > 0:
+        try:
+            override_enabled = await is_feeder_override_enabled()
+        except Exception as e:
+            logger.error(f"Failed to check feeder override: {e}. Defaulting to 'OFF'.")
+            override_enabled = False
+
+    # 4. Balance Update (very fast, in-memory)
+    wallet_balance_sats = payment_data.get('wallet_balance')
+    if wallet_balance_sats is not None and wallet_balance_sats >= 0:
+        async with app_state.lock:
+            app_state.balance = wallet_balance_sats
+    else:
+        async with app_state.lock:
+            app_state.balance += sats_received
+    
+    # 5. Feeder and Messaging Logic
+    if sats_received > 0 and not override_enabled:
+        if app_state.balance >= TRIGGER_AMOUNT_SATS:
+            logger.info(f"Balance ({app_state.balance} sats) meets trigger amount ({TRIGGER_AMOUNT_SATS} sats).")
+            if await trigger_feeder():
+                logger.info("Feeder triggered successfully.")
+                feeder_triggered = True
+                payout_amount = app_state.balance
+                
+                # Launch the already-existing background task for payouts
+                asyncio.create_task(handle_feeder_payout_and_messaging(payout_amount, sats_received))
+                
+                # Update feeder trigger metric
+                query = "UPDATE payment_metrics SET feeder_triggers = feeder_triggers + 1 WHERE id = 1"
+                await database.execute(query)
+
+        # Send 'sats_received' message only if it's NOT a zap and didn't trigger the feeder.
+        # Zaps have their own, more specific notifications handled in the background task.
+        elif sats_received >= 10:
+            difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
+            message, _ = await messaging.make_messages(config['NOS_SEC'], sats_received, difference, "sats_received")
+            await messaging.send_to_websocket_clients(message)
+            
+    elif override_enabled:
+        logger.info("Feeder override is ON. Feeder trigger logic skipped.")
+
+async def handle_cyberherd_logic_background(payment_data: dict, zap_request: dict):
+    """
+    Handles all slow I/O for CyberHerd zaps in the background.
+    This includes Nostr relay lookups and database writes.
+    """
     try:
-        payment = payment_data.get('payment', {})
-        description = payment.get('description', '')
-        extra = payment.get('extra', {})
+        zapper_pubkey = zap_request.get('pubkey', '')
+        event_id = ''
+        for tag in zap_request.get('tags', []):
+            if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'e':
+                event_id = tag[1]
+                break
 
-        # CyberHerd zap detection using proper Nostr event tag checking
-        if description:
-            try:
-                zap_receipt = json.loads(description)
-                if zap_receipt.get('kind') == 9735:
-                    for tag in zap_receipt.get('tags', []):
-                        if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'description':
-                            try:
-                                zap_request = json.loads(tag[1])
-                                zapper_pubkey = zap_request.get('pubkey', '')
-                                
-                                # Check if this is an existing CyberHerd member
-                                is_existing_member = False
-                                if zapper_pubkey:
-                                    check_query = "SELECT pubkey FROM cyber_herd WHERE pubkey = :pubkey"
-                                    member_record = await database.fetch_one(check_query, values={"pubkey": zapper_pubkey})
-                                    is_existing_member = member_record is not None
-                                
-                                for req_tag in zap_request.get('tags', []):
-                                    if isinstance(req_tag, list) and len(req_tag) >= 2 and req_tag[0] == 'e':
-                                        event_id = req_tag[1]
-                                        is_cyberherd_note = await check_cyberherd_tag(event_id)
-                                        
-                                        # Process if: 1) CyberHerd note (for new or existing members)
-                                        # OR 2) Existing member zapping any note
-                                        if is_cyberherd_note or is_existing_member:
-                                            zap_type = "CyberHerd note" if is_cyberherd_note else "member increase (any note)"
-                                            member_status = "existing member" if is_existing_member else "new member"
-                                            logger.info(f"CyberHerd zap detected in description - {zap_type} from {member_status} - processing directly")
-                                            is_cyberherd = True
-                                            await payment_metrics.record_payment(is_cyberherd=True)
-                                            
-                                            # Process CyberHerd zap directly here
-                                            await process_cyberherd_zap_from_payment(payment_data, zap_request)
-                                            return
-                            except (json.JSONDecodeError, IndexError):
-                                continue
-                        
-            except json.JSONDecodeError: 
-                pass
+        if not event_id or not zapper_pubkey:
+            return  # Not a valid zap to process
 
-        if extra and 'nostr' in extra:
-            try:
-                nostr_data = extra['nostr']
-                zap_request = json.loads(nostr_data) if isinstance(nostr_data, str) else nostr_data
-                if zap_request.get('kind') == 9734:
-                    zapper_pubkey = zap_request.get('pubkey', '')
-                    
-                    # Check if this is an existing CyberHerd member
-                    is_existing_member = False
-                    if zapper_pubkey:
-                        check_query = "SELECT pubkey FROM cyber_herd WHERE pubkey = :pubkey"
-                        member_record = await database.fetch_one(check_query, values={"pubkey": zapper_pubkey})
-                        is_existing_member = member_record is not None
-                    
-                    for tag in zap_request.get('tags', []):
-                        if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'e':
-                            event_id = tag[1]
-                            is_cyberherd_note = await check_cyberherd_tag(event_id)
-                            
-                            # Process if: 1) CyberHerd note (for new or existing members)
-                            # OR 2) Existing member zapping any note
-                            if is_cyberherd_note or is_existing_member:
-                                zap_type = "CyberHerd note" if is_cyberherd_note else "member increase (any note)"
-                                member_status = "existing member" if is_existing_member else "new member"
-                                logger.info(f"CyberHerd zap detected in payment - {zap_type} from {member_status} - processing directly")
-                                is_cyberherd = True
-                                await payment_metrics.record_payment(is_cyberherd=True)
-                                
-                                # Process CyberHerd zap directly here
-                                await process_cyberherd_zap_from_payment(payment_data, zap_request)
-                                return
-            except (json.JSONDecodeError, KeyError, TypeError, IndexError): 
-                pass
+        # --- This is where the slow operations happen ---
+        member_record = await database.fetch_one(
+            "SELECT pubkey, is_active FROM cyber_herd WHERE pubkey = :pubkey",
+            values={"pubkey": zapper_pubkey}
+        )
+        is_active_member = member_record and member_record['is_active'] == 1
+        is_cyberherd_note = await check_cyberherd_tag(event_id)
+        # -------------------------------------------------
 
-        logger.info("No CyberHerd zap detected - proceeding with normal payment processing.")
-        
-        payment_amount = payment.get('amount', 0)
-        sats_received = payment_amount // 1000
-        logger.info(f"Received non-herd payment of {sats_received} sats.")
+        if is_cyberherd_note or is_active_member:
+            is_cyberherd = True
+            zap_type = "CyberHerd note" if is_cyberherd_note else "active member increase"
+            member_status = "active member" if is_active_member else "new member"
+            logger.info(f"Background: CyberHerd zap detected - {zap_type} from {member_status} - processing.")
 
-        if sats_received > 0:
-            await update_goat_sats(sats_received)
+            # This contains the rest of the slow DB/Nostr logic
+            await process_cyberherd_zap_from_payment(payment_data, zap_request)
 
-        # Use WebSocket wallet_balance for accurate balance updates
-        wallet_balance_sats = payment_data.get('wallet_balance')
-        if wallet_balance_sats is not None and wallet_balance_sats >= 0:
-            async with app_state.lock:
-                old_balance = app_state.balance
-                app_state.balance = wallet_balance_sats
-                app_state.last_balance_update = time.time()
-                balance_change = wallet_balance_sats - old_balance
-                logger.info(f"💰 Balance updated via WebSocket: {old_balance} → {wallet_balance_sats} sats (change: {balance_change:+d})")
         else:
-            # Fallback: estimate balance based on payment amount if wallet_balance missing
-            logger.warning(f"⚠️ Missing wallet_balance in WebSocket data, using fallback calculation")
-            async with app_state.lock:
-                old_balance = app_state.balance
-                app_state.balance += sats_received
-                app_state.last_balance_update = time.time()
-                logger.info(f"💰 Balance estimated (fallback): {old_balance} → {app_state.balance} sats (+{sats_received})")
-        
-        # No need for HTTP balance sync - WebSocket provides accurate balance
+            logger.info(f"Background: Zap from {zapper_pubkey[:10]}... did not match CyberHerd criteria. Sending generic 'sats_received' message.")
 
-        if sats_received > 0 and not await is_feeder_override_enabled():
-            if app_state.balance >= TRIGGER_AMOUNT_SATS:
-                if await trigger_feeder():
-                    logger.info("Feeder triggered successfully.")
-                    feeder_triggered = True
-                    
-                    payment_amount = app_state.balance
-                    
-                    # Use direct zap payments (LNbits splits functionality removed)
-                    logger.info(f"Using direct zap payments for {payment_amount} sats")
-                    payment_result = await pay_cyberherd_members_with_splits(payment_amount)
-                    
-                    if payment_result['success']:
-                        logger.info(f"✅ CyberHerd payment successful: {payment_result.get('method', 'unknown')} method")
-                        if payment_result.get('method') == 'direct_zap_payments':
-                            logger.info(f"Zapped {payment_result.get('total_paid', 0)}/{payment_amount} sats to {payment_result.get('successful_payments', 0)} members")
-                        
-                        # Reset balance after successful payment
-                        async with app_state.lock:
-                            app_state.balance = 0
-                            app_state.last_balance_update = time.time()
-                        
-                        feeder_msg, _ = await messaging.make_messages(config['NOS_SEC'], sats_received, 0, "feeder_triggered")
-                        await messaging.send_to_websocket_clients(feeder_msg)
-                    else:
-                        logger.error(f"❌ CyberHerd payment failed: {payment_result.get('error', 'Unknown error')}")
-                        # Don't reset balance if payment failed - keep it for retry
-            else:
-                difference = TRIGGER_AMOUNT_SATS - app_state.balance
-                if sats_received >= 10:
-                    # Use proper messaging system for sats_received messages
-                    try:
-                        # Generate proper message using messaging.py templates
-                        message, command = await messaging.make_messages(
-                            config['NOS_SEC'],
-                            sats_received, 
-                            difference,
-                            "sats_received"
-                        )
-                        
-                        # Send formatted client message
-                        client_message = await messaging.format_client_message(message, "sats_received")
-                        await messaging.send_to_websocket_clients(client_message)
-                        
-                    except Exception as e:
-                        logger.error(f"❌ Error generating sats_received message: {e}")
-                        # Fallback to simple message if messaging system fails
-                        simple_message = {
-                            "type": "sats_received",
-                            "amount": sats_received,
-                            "difference": difference,
-                            "message": f"⚡ {sats_received} sats received! Thanks for supporting the goats! 🐐"
-                        }
-                        await messaging.send_to_websocket_clients(json.dumps(simple_message))
-        else:
-            logger.info("Feeder override is ON or payment amount is non-positive. Skipping feeder logic.")
+            payment = payment_data.get('payment', {})
+            sats_received = payment.get('amount', 0) // 1000
 
-        # Record successful payment processing
-        await payment_metrics.record_payment(is_cyberherd=is_cyberherd, triggered_feeder=feeder_triggered)
+            if sats_received >= 10 and not zap_request:
+                difference = max(0, TRIGGER_AMOUNT_SATS - app_state.balance)
+                message, _ = await messaging.make_messages(config['NOS_SEC'], sats_received, difference, "sats_received")
+                await messaging.send_to_websocket_clients(message)
 
     except Exception as e:
-        logger.error(f"Error processing payment data: {e}")
-        await payment_metrics.record_payment(is_cyberherd=is_cyberherd, failed=True)
-        raise
-
-
+        logger.error(f"Error in background CyberHerd processing: {e}", exc_info=True)
+        
 @http_retry
-# LNbits splits send_payment function removed - using direct zap payments only
-
 async def pay_cyberherd_members_with_splits(total_amount_sats: int):
     """
     Simple CyberHerd payment using LNbits split payments extension.
@@ -2584,6 +2567,62 @@ async def pay_cyberherd_members_with_splits(total_amount_sats: int):
             "duration": round(duration, 2)
         }
 
+# ==============================================================================
+# START: SPECIAL BOLT12 FEEDER TRIGGER
+# ==============================================================================
+
+class Bolt12SpecialTrigger(BaseModel):
+    """Pydantic model for the special BOLT12 feeder trigger."""
+    sats_received: int
+    offer_id: str
+
+@app.post("/bolt12-special-trigger")
+async def bolt12_special_trigger_handler(trigger_data: Bolt12SpecialTrigger):
+    """
+    This endpoint receives a notification for a specific BOLT12 offer.
+    It triggers the feeder and sends a specific notification, bypassing all
+    balance checks and payment logic.
+    """
+    logger.info(f"⚡ SPECIAL TRIGGER received for offer {trigger_data.offer_id} with {trigger_data.sats_received} sats.")
+
+    try:
+        # 1. Trigger the physical feeder directly
+        feeder_triggered = await trigger_feeder()
+
+        if feeder_triggered:
+            logger.info("✅ Feeder triggered successfully via special BOLT12 offer.")
+            
+            # 2. Create the new, specific message
+            # This requires adding the "feeder_trigger_bolt12" event_type to your messaging.py file
+            message, _ = await messaging.make_messages(
+                config['NOS_SEC'], 
+                trigger_data.sats_received, 
+                0, # difference is not relevant here
+                "feeder_trigger_bolt12",
+                relays=RELAYS
+            )
+            
+            # 3. Send the message to all connected clients
+            await messaging.send_to_websocket_clients(message)
+            logger.info("📢 Sent 'feeder_trigger_bolt12' message to clients.")
+
+            return JSONResponse(
+                status_code=200,
+                content={"status": "success", "message": "Feeder triggered and notification sent."}
+            )
+        else:
+            logger.error("❌ Feeder trigger call failed for special BOLT12 offer.")
+            raise HTTPException(status_code=500, detail="Failed to trigger the feeder.")
+
+    except Exception as e:
+        logger.error(f"Error in special BOLT12 trigger handler: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error during special trigger processing.")
+
+
+# ==============================================================================
+# END: SPECIAL BOLT12 FEEDER TRIGGER
+# ==============================================================================
+
 # FastAPI Endpoints - Health and Balance
 
 @app.get("/health")
@@ -2629,7 +2668,7 @@ async def get_trigger_amount_base_route():
 async def get_cyberherd_spots_remaining():
     """Get remaining spots in the cyber herd"""
     try:
-        query = "SELECT COUNT(*) as count FROM cyber_herd"
+        query = "SELECT COUNT(*) as count FROM cyber_herd WHERE is_active = 1"
         result = await database.fetch_one(query)
         spots_remaining = max(0, MAX_HERD_SIZE - result['count'])
         return {"spots_remaining": spots_remaining}
@@ -2656,32 +2695,99 @@ async def reset_payment_metrics():
         logger.error(f"Error resetting payment metrics: {e}")
         return {"status": "error", "message": "Failed to reset metrics"}
 
-
 async def process_existing_member(item_dict: dict, item: CyberHerdData, result: dict, members_to_notify: list):
-    """Process a cumulative zap for an existing herd member."""
+    """
+    Process a cumulative zap for an existing herd member. It handles two cases:
+    1. An inactive member becoming active (`cyber_herd` notification).
+    2. An already active member increasing their amount (`member_increase` notification).
+    It also periodically refreshes their metadata and relay list.
+    """
+    # Determine if this is a reactivation based on the member's status *before* this transaction
+    is_reactivation = result.get('is_active') == 0
+
+    # Periodically refresh user metadata to prevent stale data (e.g., every 5 days)
+    last_checked = result.get('metadata_last_checked_at', 0) or 0
+    should_refresh_metadata = (time.time() - last_checked) > (86400 * 5)
+
+    refreshed_data = {}
+    if should_refresh_metadata:
+        logger.info(f"Metadata and relays for {result['display_name']} are stale. Refreshing...")
+        metadata_fetcher = MetadataFetcher()
+        stored_relays = json.loads(result.get('relays', '[]'))
+        
+        # Fetch metadata
+        metadata = await metadata_fetcher.lookup_metadata(item_dict['pubkey'], stored_relays or RELAYS)
+        
+        # Fetch user-specific relays from their kind 10002 event
+        user_relays = await lookup_relay_list(item_dict['pubkey'], stored_relays or RELAYS)
+
+        if metadata:
+            refreshed_data = {
+                "display_name": metadata.get('display_name', result['display_name']),
+                "picture": metadata.get('picture', result['picture']),
+                "lud16": metadata.get('lud16', result['lud16']),
+            }
+            logger.info(f"Successfully refreshed metadata for {result['display_name']}.")
+        else:
+            logger.warning(f"Could not refresh metadata for {result['display_name']}.")
+
+        if user_relays:
+            refreshed_data['relays'] = user_relays
+            logger.info(f"Successfully refreshed relays for {result['display_name']}.")
+
+    # Calculate new totals
     new_amount = result['amount'] + item_dict['amount']
     new_payouts = result['payouts'] + calculate_payout(item_dict['amount'])
     
+    # Use refreshed data if available, otherwise use existing data from the database
+    final_display_name = refreshed_data.get('display_name', result['display_name'])
+    final_picture = refreshed_data.get('picture', result['picture'])
+    final_lud16 = refreshed_data.get('lud16', result['lud16'])
+    final_relays = refreshed_data.get('relays', json.loads(result.get('relays', '[]')))
+
+    # The UPDATE statement sets the member to active for the day
     update_query = """
         UPDATE cyber_herd 
-        SET amount = :amount, payouts = :payouts 
+        SET 
+            amount = :amount, 
+            payouts = :payouts,
+            display_name = :display_name,
+            picture = :picture,
+            lud16 = :lud16,
+            relays = :relays,
+            metadata_last_checked_at = :checked_at,
+            is_active = 1
         WHERE pubkey = :pubkey
     """
     await database.execute(update_query, values={
         "amount": new_amount,
         "payouts": new_payouts,
+        "display_name": final_display_name,
+        "picture": final_picture,
+        "lud16": final_lud16,
+        "relays": json.dumps(final_relays),
+        "checked_at": int(time.time()) if should_refresh_metadata or last_checked == 0 else last_checked,
         "pubkey": item_dict['pubkey']
     })
     
-    logger.info(f"Updated existing member {item_dict['pubkey']} with {item_dict['amount']} sats. New total: {new_amount}")
+    # Set notification type and log message based on whether the member was already active
+    if is_reactivation:
+        notification_type = "cyber_herd"
+        log_message = f"Reactivated member '{final_display_name}' with {item_dict['amount']} sats. New daily total: {new_amount}"
+    else:
+        notification_type = "member_increase"
+        log_message = f"Updated active member '{final_display_name}' with {item_dict['amount']} sats. New daily total: {new_amount}"
+
+    logger.info(log_message)
     
-    # Update split payment targets since payouts changed
+    # Update split payment targets since the active herd composition has changed
     await update_split_targets_from_herd()
     
+    # Prepare notification data with the correct type
     notification_data = {
-        "type": "member_increase",
+        "type": notification_type,
         "pubkey": item_dict['pubkey'],
-        "display_name": result['display_name'],
+        "display_name": final_display_name,
         "nprofile": result['nprofile'],
         "event_id": item_dict['event_id'],
         "amount": new_amount,
@@ -2689,14 +2795,24 @@ async def process_existing_member(item_dict: dict, item: CyberHerdData, result: 
     }
     members_to_notify.append(notification_data)
 
-
 async def process_new_member(item_dict: dict, members_to_notify: list):
-    """Process a zap from a new member when there is space in the herd."""
+    """
+    Process a zap from a new member, adding them to the database as an active member.
+    """
     payouts = calculate_payout(item_dict['amount'])
     
+    # MODIFIED: The INSERT statement now explicitly sets is_active to 1.
     insert_query = """
-        INSERT INTO cyber_herd (pubkey, display_name, event_id, note, kinds, nprofile, lud16, notified, payouts, amount, picture, relays)
-        VALUES (:pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, :notified, :payouts, :amount, :picture, :relays)
+        INSERT INTO cyber_herd (
+            pubkey, display_name, event_id, note, kinds, nprofile, lud16, 
+            notified, payouts, amount, picture, relays, 
+            is_active, metadata_last_checked_at
+        )
+        VALUES (
+            :pubkey, :display_name, :event_id, :note, :kinds, :nprofile, :lud16, 
+            :notified, :payouts, :amount, :picture, :relays, 
+            1, :metadata_last_checked_at
+        )
     """
     await database.execute(insert_query, values={
         "pubkey": item_dict['pubkey'],
@@ -2710,14 +2826,16 @@ async def process_new_member(item_dict: dict, members_to_notify: list):
         "payouts": payouts,
         "amount": item_dict['amount'],
         "picture": item_dict['picture'],
-        "relays": json.dumps(item_dict.get('relays', RELAYS[:2]))
+        "relays": json.dumps(item_dict.get('relays', RELAYS[:2])),
+        "metadata_last_checked_at": int(time.time())
     })
     
-    logger.info(f"Added new member {item_dict['pubkey']} with {item_dict['amount']} sats.")
+    logger.info(f"Added new active member {item_dict['pubkey']} with {item_dict['amount']} sats.")
     
-    # Update split payment targets since a new member was added
+    # Update split payment targets since the active herd has changed
     await update_split_targets_from_herd()
     
+    # Prepare notification data
     notification_data = {
         "type": "new_member",
         "pubkey": item_dict['pubkey'],
@@ -2737,6 +2855,7 @@ async def update_system_balance():
 
 async def process_notifications(members_to_notify: list, difference: int, final_herd_size: int):
     """Send notifications for all processed events."""
+    notified_count = 0
     for member_info in members_to_notify:
         try:
             member_info_copy = member_info.copy()
@@ -2760,10 +2879,15 @@ async def process_notifications(members_to_notify: list, difference: int, final_
             if pubkey_to_update:
                 update_query = "UPDATE cyber_herd SET notified = :notified_at WHERE pubkey = :pubkey"
                 await database.execute(update_query, values={"notified_at": time.time(), "pubkey": pubkey_to_update})
-                logger.info(f"Marked member {pubkey_to_update} as notified.")
-
+                # CHANGED: This log happens in a loop and is now DEBUG level.
+                logger.debug(f"Marked member {pubkey_to_update} as notified.")
+                notified_count += 1
         except Exception as e:
             logger.error(f"Failed to send or update notification for {member_info.get('pubkey')}: {e}")
+            
+    # ADDED: A single summary log message at INFO level.
+    if notified_count > 0:
+        logger.info(f"Sent and marked {notified_count} member(s) as notified.")
     
     # After processing all notifications, send updated CyberHerd member list for accordion display
     if members_to_notify:
@@ -2794,33 +2918,39 @@ async def get_cyber_herd():
 @app.post("/reset_cyber_herd")
 async def reset_cyber_herd():
     """
-    Resets the CyberHerd by clearing the table (LNbits splits functionality removed).
+    Resets the daily active status and contribution data of the CyberHerd.
+    Sets all members to inactive, clears daily stats, and clears LNbits splits.
+    Does NOT delete user records.
     """
     try:
         async with database.transaction():
-            delete_query = "DELETE FROM cyber_herd"
-            await database.execute(delete_query)
-            logger.info("Cyber herd table has been cleared.")
+            reset_query = """
+                UPDATE cyber_herd 
+                SET 
+                    is_active = 0,
+                    amount = 0,
+                    payouts = 0.0,
+                    event_id = NULL,
+                    note = NULL,
+                    kinds = NULL
+            """
+            await database.execute(reset_query)
+            logger.info("Daily reset: All CyberHerd members have been set to inactive and their daily stats have been cleared.")
 
-        # Update split payment targets since herd is now empty
+        # This will now find 0 active members and clear the LNbits splits automatically.
         await update_split_targets_from_herd()
 
+        # Send a generic reset message to clients
         message, _ = await messaging.make_messages(config['NOS_SEC'], 0, 0, "herd_reset", relays=RELAYS)
         await messaging.send_to_websocket_clients(message)
         
-        # Send empty CyberHerd update to clear accordion display
-        empty_cyberherd_message = {
-            "type": "cyber_herd",
-            "members": [],
-            "total_members": 0,
-            "message": "🐐 CyberHerd has been reset"
-        }
-        await messaging.send_to_websocket_clients(json.dumps(empty_cyberherd_message))
+        # Send an update that shows the active herd is now empty for the new day
+        await send_cyberherd_update()
 
-        return {"status": "Cyber herd reset successfully"}
+        return {"status": "Cyber herd daily active status and stats reset successfully"}
     except Exception as e:
-        logger.error(f"Failed to reset cyber herd: {e}")
-        raise HTTPException(status_code=500, detail="Failed to reset cyber herd")
+        logger.error(f"Failed to reset cyber herd daily status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to reset cyber herd daily status")
 
 @app.post("/delete_cyber_herd_member/{pubkey}")
 async def delete_cyber_herd_member(pubkey: str):
@@ -2846,41 +2976,6 @@ async def delete_cyber_herd_member(pubkey: str):
         logger.error(f"Failed to delete member {pubkey}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete member {pubkey}")
 
-@app.post("/set_goat_sats")
-async def set_goat_sats(data: SetGoatSatsData):
-    """Manually sets the GoatSats value in OpenHAB and the local cache."""
-    try:
-        new_amount = data.new_amount        
-        # Update OpenHAB
-        auth = (config['OH_AUTH_1'], '')
-        headers = {"Content-Type": "text/plain"}
-        put_url = f"{config['OPENHAB_URL']}/rest/items/GoatSats/state"
-        put_response = await http_client.put(put_url, headers=headers, auth=auth, content=str(new_amount))
-        put_response.raise_for_status()
-        
-        # Update cache
-        await cache.set("goat_sats_state", new_amount)
-        
-        logger.info(f"GoatSats manually set to {new_amount}")
-        return {"status": "success", "new_amount": new_amount}
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error setting GoatSats in OpenHAB: {e}")
-        raise HTTPException(status_code=500, detail="Failed to set GoatSats in OpenHAB")
-    except Exception as e:
-        logger.error(f"Unexpected error setting GoatSats: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error setting GoatSats")
-
-@app.get("/get_goat_sats")
-async def get_goat_sats():
-    """Retrieves the current sum of GoatSats for the day."""
-    return await get_goat_sats_sum_today()
-
-@app.get("/get_goat_feedings")
-async def get_goat_feedings_route():
-    """Retrieves the number of goat feedings from OpenHAB."""
-    return await get_goat_feedings()
-
-
 @app.post("/cyberherd/update_split_targets")
 async def update_split_targets_endpoint():
     """
@@ -2903,240 +2998,6 @@ async def update_split_targets_endpoint():
             "error": str(e),
             "message": "Failed to update split payment targets"
         }
-
-
-@app.post("/cyberherd/pay_direct")
-async def pay_cyberherd_direct(amount: int = 0):
-    """
-    Manually trigger direct CyberHerd payments using configured method.
-    
-    Args:
-        amount: Amount to distribute (default: current balance)
-    
-    Returns:
-        Payment results and status
-    """
-    try:
-        payment_amount = amount if amount > 0 else app_state.balance
-        
-        if payment_amount <= 0:
-            return {"success": False, "error": "No amount specified and balance is zero"}
-        
-        # Use direct zap payments (LNbits splits functionality removed)
-        logger.info(f"Manual direct CyberHerd zap payment triggered for {payment_amount} sats")
-        result = await pay_cyberherd_members_with_splits(payment_amount)
-        
-        # Reset balance if payment was successful and we used the full balance
-        if result['success'] and amount == 0:
-            async with app_state.lock:
-                app_state.balance = 0
-                app_state.last_balance_update = time.time()
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in manual payment: {e}")
-        return {"success": False, "error": str(e)}
-
-@app.get("/cyberherd/payment_preview")
-async def preview_cyberherd_payments():
-    """
-    Preview how payments would be distributed to CyberHerd members
-    using direct zap payments (LNbits splits removed).
-    
-    Returns:
-        Distribution preview with amounts per member
-    """
-    try:
-        # Get current herd members from local database
-        query = "SELECT pubkey, display_name, lud16, payouts, amount FROM cyber_herd ORDER BY payouts DESC"
-        herd_members = await database.fetch_all(query)
-        
-        payment_method = "direct_zap_payments"
-        
-        if not herd_members:
-            return {
-                "success": True,
-                "payment_method": payment_method,
-                "total_members": 0,
-                "distribution": [],
-                "fallback_wallet": {
-                    "recipient": "predefined_wallet",
-                    "amount": app_state.balance,
-                    "reason": "No CyberHerd members found",
-                    "method": "zap"
-                }
-            }
-        
-        members_list = [dict(member) for member in herd_members]
-        total_payouts = sum(member.get('payouts', 0) for member in members_list)
-        total_amount = app_state.balance
-        
-        distribution = []
-        
-        if total_payouts == 0:
-            # Equal split among all members
-            amount_per_member = total_amount // len(members_list)
-            remainder = total_amount % len(members_list)
-            
-            for i, member in enumerate(members_list):
-                member_amount = amount_per_member
-                if i < remainder:
-                    member_amount += 1
-                
-                distribution.append({
-                    "pubkey": member['pubkey'],
-                    "display_name": member['display_name'],
-                    "lud16": member['lud16'],
-                    "payouts": member['payouts'],
-                    "total_contributed": member['amount'],
-                    "payment_amount": member_amount,
-                    "calculation": "equal_split",
-                    "payment_method": "zap"
-                })
-        else:
-            # Proportional split based on payouts
-            for member in members_list:
-                member_payouts = member.get('payouts', 0)
-                member_amount = int((member_payouts / total_payouts) * total_amount)
-                
-                distribution.append({
-                    "pubkey": member['pubkey'],
-                    "display_name": member['display_name'],
-                    "lud16": member['lud16'],
-                    "payouts": member_payouts,
-                    "total_contributed": member['amount'],
-                    "payment_amount": member_amount,
-                    "calculation": f"{member_payouts}/{total_payouts} = {(member_payouts/total_payouts)*100:.1f}%",
-                    "payment_method": "zap"
-                })
-        
-        total_distributed = sum(d['payment_amount'] for d in distribution)
-        remainder = total_amount - total_distributed
-        
-        return {
-            "success": True,
-            "payment_method": payment_method,
-            "total_amount": total_amount,
-            "total_members": len(members_list),
-            "total_distributed": total_distributed,
-            "remainder": remainder,
-            "distribution": distribution,
-            "remainder_destination": "predefined_wallet" if remainder > 0 else None,
-            "remainder_method": "zap"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error previewing CyberHerd payments: {e}")
-        return {"success": False, "error": str(e)}
-
-@app.get("/cyberherd/payment_methods")
-async def get_payment_methods():
-    """
-    Get information about available payment methods and their current configuration.
-    
-    Returns:
-        Payment method capabilities and configuration
-    """
-    try:
-        # Check herd members count
-        query = "SELECT COUNT(*) as count FROM cyber_herd"
-        result = await database.fetch_one(query)
-        herd_size = result['count']
-        
-        # Check predefined wallet configuration
-        predefined_lud16 = config.get('PREDEFINED_WALLET_ADDRESS')
-        predefined_alias = config.get('PREDEFINED_WALLET_ALIAS')
-        
-        # Get current payment method setting
-        use_direct_zaps = True  # Always use direct zaps now (splits removed)
-        
-        return {
-            "success": True,
-            "current_method": "direct_zap_payments",
-            "methods": {
-                "direct_zap_payments": {
-                    "available": True,
-                    "active": True,
-                    "description": "Zap each CyberHerd member directly using proper Nostr zap flow",
-                    "herd_members": herd_size,
-                    "benefits": [
-                        "Proper Nostr zap protocol",
-                        "Individual member notifications",
-                        "Better user experience",
-                        "Direct member engagement",
-                        "LNURL fallback support"
-                    ]
-                },
-                "predefined_wallet": {
-                    "available": bool(predefined_lud16),
-                    "address": predefined_lud16,
-                    "alias": predefined_alias,
-                    "description": "Fallback wallet for remainders and when no herd members exist",
-                    "usage": "remainder_and_fallback"
-                }
-            },
-            "configuration": {
-                "note": "LNbits splits functionality has been removed. Only direct zap payments are supported."
-            },
-            "current_balance": app_state.balance,
-            "trigger_amount": TRIGGER_AMOUNT_SATS
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting payment methods: {e}")
-        return {"success": False, "error": str(e)}
-
-@app.get("/cyberherd/configuration")
-async def get_cyberherd_configuration():
-    """
-    Get current CyberHerd configuration and system status.
-    
-    Returns:
-        Configuration details and system information
-    """
-    try:
-        # Get herd statistics
-        herd_query = "SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_amount, COALESCE(SUM(payouts), 0) as total_payouts FROM cyber_herd"
-        herd_stats = await database.fetch_one(herd_query)
-        
-        # Get payment method configuration - simplified to LNURL only
-        
-        return {
-            "success": True,
-            "system_info": {
-                "max_herd_size": MAX_HERD_SIZE,
-                "trigger_amount_sats": TRIGGER_AMOUNT_SATS,
-                "headbutt_min_sats": HEADBUTT_MIN_SATS,
-                "current_balance": app_state.balance
-            },
-            "herd_statistics": {
-                "current_members": herd_stats['count'],
-                "spots_remaining": max(0, MAX_HERD_SIZE - herd_stats['count']),
-                "total_contributed": herd_stats['total_amount'],
-                "total_payouts_earned": herd_stats['total_payouts']
-            },
-            "payment_configuration": {
-                "method": "simple_lnurl_payments",
-                "use_direct_zap_payments": False,
-                "description": "Uses simple LNURL payments for reliable CyberHerd distributions"
-            },
-            "wallet_configuration": {
-                "predefined_wallet_address": config.get('PREDEFINED_WALLET_ADDRESS'),
-                "predefined_wallet_alias": config.get('PREDEFINED_WALLET_ALIAS'),
-                "herd_wallet_configured": bool(config.get('HERD_KEY')),
-                "cyberherd_wallet_configured": bool(config.get('CYBERHERD_KEY'))
-            },
-            "nostr_configuration": {
-                "private_key_configured": bool(config.get('NOS_SEC')),
-                "public_key_configured": bool(config.get('HEX_KEY')),
-                "websocket_configured": bool(config.get('HERD_WEBSOCKET'))
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting CyberHerd configuration: {e}")
-        return {"success": False, "error": str(e)}
 
 @app.get("/ws")
 async def redirect_ws():
