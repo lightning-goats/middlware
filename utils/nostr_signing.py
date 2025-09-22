@@ -329,4 +329,3 @@ def validate_relay_url(url: str) -> bool:
     except Exception:
         return False
 
-
