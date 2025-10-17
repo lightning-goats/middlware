@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Optional, List, Dict
 from dotenv import load_dotenv
-from utils.helpers import DEFAULT_RELAYS
+from utils.helpers import DEFAULT_RELAYS, format_nostr_event_reference
 
 # Load environment variables
 load_dotenv()
@@ -16,6 +16,9 @@ LOCAL_RELAY_URL = os.getenv('LOCAL_RELAY_URL', 'ws://127.0.0.1:7000')
 
 # Configure nak binary path
 NAK_PATH = os.getenv('NAK_PATH', 'nak')  # Default to 'nak' to use PATH, or set specific path
+
+# Configure command testing mode
+TEST_COMMANDS = os.getenv('TEST_COMMANDS', 'false').lower() == 'true'
 
 if TESTING_MODE:
     RELAY_URLS = LOCAL_RELAY_URL
@@ -68,6 +71,29 @@ def join_with_and(items):
     else:
         return ''
 
+async def execute_nostr_command_background(command: str):
+    """
+    Executes a shell command in the background without blocking.
+    Logs the outcome for debugging.
+    """
+    if TEST_COMMANDS:
+        logger.info(f"🧪 TEST MODE: Would execute background command: {command}")
+        return
+    
+    try:
+        process = await asyncio.create_subprocess_shell(
+            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"Background Nostr command failed (code {process.returncode}): {stderr.decode().strip()}")
+        else:
+            # Extract and log the event ID for confirmation
+            event_id = extract_id_from_stdout(stdout.decode())
+            logger.info(f"✅ Background Nostr command succeeded. Event ID: {event_id}")
+    except Exception as e:
+        logger.error(f"Exception during background command execution: {e}")
 
 async def make_messages(
     nos_sec: str,
@@ -76,7 +102,9 @@ async def make_messages(
     event_type: str,
     cyber_herd_item: dict = None,
     spots_remaining: int = 0,
-    relays: Optional[List[str]] = None
+    relays: Optional[List[str]] = None,
+    reply_to_30311_event: Optional[str] = None,
+    reply_to_30311_a_tag: Optional[str] = None
 ):
     global notified
     
@@ -86,6 +114,7 @@ async def make_messages(
     message_dict = {
         "sats_received": sats_received_dict,
         "feeder_triggered": feeder_trigger_dict,
+        "feeder_trigger_bolt12": feeder_trigger_dict, # Use the same message templates
         "cyber_herd": cyber_herd_dict,
         "cyber_herd_info": cyber_herd_info_dict,
         "cyber_herd_treats": cyber_herd_treats_dict,
@@ -114,14 +143,16 @@ async def make_messages(
     # Randomly pick a template from whichever dict was selected
     template = random.choice(list(message_templates.values()))
     command = None
+    nostr_message_content = "" # For storing the final nostr message
 
     # -- Handle each event_type separately --
-    if event_type == "cyber_herd":
-        display_name = cyber_herd_item.get("display_name", "anon")
-        event_id = cyber_herd_item.get("event_id", "")
-        pub_key = cyber_herd_item.get("pubkey", "")
-        nprofile = cyber_herd_item.get("nprofile", "")
-        amount = cyber_herd_item.get("amount", 0)
+    # CORRECTED: Consolidated "new_member" into "cyber_herd" to ensure nak command is always built.
+    if event_type in ["cyber_herd", "new_member"]:
+        display_name = cyber_herd_item.get("display_name", "anon") if cyber_herd_item else "anon"
+        event_id = cyber_herd_item.get("event_id", "") if cyber_herd_item else ""
+        pub_key = cyber_herd_item.get("pubkey", "") if cyber_herd_item else ""
+        nprofile = cyber_herd_item.get("nprofile", "") if cyber_herd_item else ""
+        amount = cyber_herd_item.get("amount", 0) if cyber_herd_item else 0
 
         # Decide on a "thank you" snippet
         if amount == 0:
@@ -133,6 +164,13 @@ async def make_messages(
         # Ensure nprofile is well-formed
         if nprofile and not nprofile.startswith("nostr:"):
             nprofile = f"nostr:{nprofile}"
+
+        tracked_reference = None
+        if cyber_herd_item:
+            tracked_reference = cyber_herd_item.get("tracked_event_reference")
+        if not tracked_reference:
+            tracked_reference = format_nostr_event_reference(event_id)
+        nostr_name = tracked_reference or nprofile or display_name
 
         # Spots info
         spots_info = ""
@@ -153,10 +191,10 @@ async def make_messages(
             headbutt_text = f" {headbutt_message.format(required_sats=required_sats, victim_name=victim_name)}"
 
         # Format the message for nostr
-        message = (
+        nostr_message_content = (
             template.format(
                 thanks_part=thanks_part,
-                name=nprofile,
+                name=nostr_name,
                 difference=difference,
                 new_amount=amount,
                 event_id=event_id
@@ -165,13 +203,33 @@ async def make_messages(
             + headbutt_text
         )
 
-        command = (
-            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-            f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
-            f'-p {pub_key} '
-            f'{RELAY_URLS}'
-        )
+        # Strip promotional URL for NIP-53 chat messages
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            nostr_message_content = nostr_message_content.replace("\n\n https://lightning-goats.com\n\n", "")
 
+        # Build the command if we have the necessary info
+        if pub_key and event_id:
+            # Determine event kind: Use kind 1311 for NIP-53 chat messages (replies to 30311), else kind 1
+            event_kind = 1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1
+            
+            # Base command with kind
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} --kind {event_kind} -c "{nostr_message_content}" '
+                f'-t e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+                f'-p {pub_key}'
+            )
+            
+            # Add 30311 event reference tags if provided (NIP-53 compliant)
+            if reply_to_30311_event and reply_to_30311_a_tag:
+                command += f' -t a={reply_to_30311_a_tag}'  # Primary a tag for 30311 reference
+                command += f' -t e={reply_to_30311_event}'  # e tag for direct reply
+            
+            command += f' {RELAY_URLS}'
+        else:
+            logger.warning(f"Missing pubkey or event_id for {event_type} notification. Cannot send Nostr note.")
+
+
+        # Format the message for the client (websocket)
         message = (
             template.format(
                 thanks_part=thanks_part,
@@ -183,8 +241,8 @@ async def make_messages(
             + spots_info
             + headbutt_text
         )
-
-    elif event_type in ["sats_received", "feeder_triggered"]:
+    
+    elif event_type == "feeder_triggered":
         # Check if the selected template contains goat names
         if "{goat_name}" in template:
             # Only generate goat data if the template uses goat names
@@ -207,16 +265,16 @@ async def make_messages(
             difference_message = variation_message.format(difference=difference)
 
             # First formatting includes goat_nprofiles
-            message = template.format(
-                new_amount=new_amount,    # or amount, if you prefer
+            nostr_message_content = template.format(
+                new_amount=new_amount,
                 goat_name=goat_nprofiles,
                 difference_message=difference_message
             )
 
             pubkey_part = " ".join(f"-p {pubkey}" for pubkey in goat_pubkeys)
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f' --tag t=LightningGoats {pubkey_part} '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=LightningGoats {pubkey_part} '
                 f'{RELAY_URLS}'
             )
 
@@ -235,10 +293,146 @@ async def make_messages(
                 new_amount=new_amount,
                 difference_message=difference_message
             )
+            nostr_message_content = message
             
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f' --tag t=LightningGoats '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=LightningGoats '
+                f'{RELAY_URLS}'
+            )
+            
+            # Then reformat to show goat_names in the final message
+            message = template.format(
+                new_amount=new_amount,
+                difference_message=difference_message
+            )
+
+    elif event_type == "feeder_trigger_bolt12":
+        bolt12_prefix = "⚡BOLT12 PAYMENT⚡ "
+        # Check if the selected template contains goat names
+        if "{goat_name}" in template:
+            # Only generate goat data if the template uses goat names
+            selected_goats = get_random_goat_names(goat_names_dict)
+            
+            # Store goat data for client message
+            selected_goats_data = [
+                {
+                    "name": name,
+                    "imageUrl": f"images/{name.lower()}.png"
+                }
+                for name, _, _ in selected_goats
+            ]
+            
+            goat_names = join_with_and([name for name, _, _ in selected_goats])
+            goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
+            goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
+
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
+
+            # Create base messages
+            base_nostr_message = template.format(
+                new_amount=new_amount,
+                goat_name=goat_nprofiles,
+                difference_message=difference_message
+            )
+            base_client_message = template.format(
+                new_amount=new_amount,
+                goat_name=goat_names,
+                difference_message=difference_message
+            )
+            
+            # Prepend prefix
+            nostr_message_content = bolt12_prefix + base_nostr_message
+            message = bolt12_prefix + base_client_message
+
+            pubkey_part = " ".join(f"-p {pubkey}" for pubkey in goat_pubkeys)
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=LightningGoats {pubkey_part} '
+                f'{RELAY_URLS}'
+            )
+        else:
+            # Template doesn't use goat names, format without them
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
+            
+            base_message = template.format(
+                new_amount=new_amount,
+                difference_message=difference_message
+            )
+            
+            # Prepend prefix
+            message = bolt12_prefix + base_message
+            nostr_message_content = message
+            
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=LightningGoats '
+                f'{RELAY_URLS}'
+            )
+            
+            message = template.format(
+                new_amount=new_amount,
+                difference_message=difference_message
+            )
+
+    elif event_type == "sats_received":
+        # Check if the selected template contains goat names
+        if "{goat_name}" in template:
+            # Only generate goat data if the template uses goat names
+            selected_goats = get_random_goat_names(goat_names_dict)
+            
+            # Store goat data for client message
+            selected_goats_data = [
+                {
+                    "name": name,
+                    "imageUrl": f"images/{name.lower()}.png"
+                }
+                for name, _, _ in selected_goats
+            ]
+            
+            goat_names = join_with_and([name for name, _, _ in selected_goats])
+            goat_nprofiles = join_with_and([nprofile for _, nprofile, _ in selected_goats])
+            goat_pubkeys = [pubkey for _, _, pubkey in selected_goats]
+
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
+
+            # First formatting includes goat_nprofiles
+            nostr_message_content = template.format(
+                new_amount=new_amount,
+                goat_name=goat_nprofiles,
+                difference_message=difference_message
+            )
+
+            pubkey_part = " ".join(f"-p {pubkey}" for pubkey in goat_pubkeys)
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f' -t t=LightningGoats {pubkey_part} '
+                f'{RELAY_URLS}'
+            )
+
+            # Then reformat to show goat_names in the final message
+            message = template.format(
+                new_amount=new_amount,
+                goat_name=goat_names,
+                difference_message=difference_message
+            )
+        else:
+            # Template doesn't use goat names, format without them
+            variation_message = random.choice(list(variations.values()))
+            difference_message = variation_message.format(difference=difference)
+            
+            message = template.format(
+                new_amount=new_amount,
+                difference_message=difference_message
+            )
+            nostr_message_content = message
+            
+            command = (
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f' -t t=LightningGoats '
                 f'{RELAY_URLS}'
             )
 
@@ -260,10 +454,14 @@ async def make_messages(
             victim_nprofile = f"nostr:{victim_nprofile}"
         
         # Create Nostr message with nprofile
-        nostr_message = template.format(
+        nostr_message_content = template.format(
             required_sats=required_sats,
             victim_name=victim_nprofile if victim_nprofile else victim_name
         )
+        
+        # Strip promotional URL for NIP-53 chat messages
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            nostr_message_content = nostr_message_content.replace("\n\n https://lightning-goats.com\n\n", "")
         
         # Create client message with display name
         client_message = template.format(
@@ -271,24 +469,31 @@ async def make_messages(
             victim_name=victim_name
         )
         
-        # Use nostr_message for the command
-        message = nostr_message
-        
         # Create Nostr command for headbutt info - reply to the cyberherd note
         if event_id:
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+                f'{NAK_PATH} event --sec {nos_sec} -k {1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1} -c "{nostr_message_content}" '
+                f'-t e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
                 f'-p {victim_pubkey} '
-                f'{RELAY_URLS}'
             )
+            
+            # Add 30311 event reference tags if provided (NIP-53 compliant)
+            if reply_to_30311_event and reply_to_30311_a_tag:
+                command += f' -t a={reply_to_30311_a_tag} -t e={reply_to_30311_event}'
+            
+            command += f' {RELAY_URLS}'
         else:
             # Fallback to standalone note if no event_id available
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f'--tag t=CyberHerd --tag t=HeadbuttInfo '
-                f'{RELAY_URLS}'
+                f'{NAK_PATH} event --sec {nos_sec} --kind {1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1} -c "{nostr_message_content}" '
+                f'-t t=CyberHerd -t t=HeadbuttInfo '
             )
+            
+            # Add 30311 event reference tags if provided (NIP-53 compliant)
+            if reply_to_30311_event and reply_to_30311_a_tag:
+                command += f' -t a={reply_to_30311_a_tag} -t e={reply_to_30311_event}'
+            
+            command += f' {RELAY_URLS}'
         
         # Override message for client formatting
         message = client_message
@@ -308,20 +513,21 @@ async def make_messages(
             name=display_name if not nprofile else nprofile,
             difference=difference
         )
+        nostr_message_content = message
         
         # Command for posting to nostr
         if cyber_herd_item and cyber_herd_item.get("pubkey"):
             pub_key = cyber_herd_item.get("pubkey")
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f'--tag t=CyberHerd --tag t=CyberHerdInfo '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=CyberHerd -t t=CyberHerdInfo '
                 f'-p {pub_key} '
                 f'{RELAY_URLS}'
             )
         else:
             command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-                f'--tag t=CyberHerd --tag t=CyberHerdInfo '
+                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+                f'-t t=CyberHerd -t t=CyberHerdInfo '
                 f'{RELAY_URLS}'
             )
 
@@ -354,13 +560,22 @@ async def make_messages(
             next_headbutt_message = random.choice(list(headbutt_info_dict.values()))
             next_headbutt_text = f" {next_headbutt_message.format(required_sats=required_sats, victim_name=next_victim_name)}"
         
-        # Create Nostr message with nprofiles
-        nostr_message = template.format(
-            attacker_name=attacker_nprofile if attacker_nprofile else attacker_name,
+        tracked_reference = cyber_herd_item.get("tracked_event_reference") if cyber_herd_item else None
+        if not tracked_reference:
+            tracked_reference = format_nostr_event_reference(event_id)
+        nostr_attacker_name = tracked_reference or attacker_nprofile or attacker_name
+
+        # Create Nostr message with event reference fallback
+        nostr_message_content = template.format(
+            attacker_name=nostr_attacker_name,
             attacker_amount=attacker_amount,
             victim_name=victim_nprofile if victim_nprofile else victim_name,
             victim_amount=victim_amount
         ) + next_headbutt_text
+        
+        # Strip promotional URL for NIP-53 chat messages
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            nostr_message_content = nostr_message_content.replace("\n\n https://lightning-goats.com\n\n", "")
         
         # Create client message with display names
         client_message = template.format(
@@ -370,16 +585,18 @@ async def make_messages(
             victim_amount=victim_amount
         ) + next_headbutt_text
         
-        # Use nostr_message for the command
-        message = nostr_message
-        
         # Create Nostr command for headbutt success - reply to the cyberherd note that was zapped
         command = (
-            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-            f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+            f'{NAK_PATH} event --sec {nos_sec} --kind {1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1} -c "{nostr_message_content}" '
+            f'-t e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
             f'-p {attacker_pubkey} -p {victim_pubkey} '
-            f'{RELAY_URLS}'
         )
+        
+        # Add 30311 event reference tags if provided (NIP-53 compliant)
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            command += f' -t a={reply_to_30311_a_tag} -t e={reply_to_30311_event}'
+        
+        command += f' {RELAY_URLS}'
         
         # Override message for client formatting
         message = client_message
@@ -403,14 +620,23 @@ async def make_messages(
         if victim_nprofile and not victim_nprofile.startswith("nostr:"):
             victim_nprofile = f"nostr:{victim_nprofile}"
         
-        # Create Nostr message with nprofiles
-        nostr_message = template.format(
-            attacker_name=attacker_nprofile if attacker_nprofile else attacker_name,
+        tracked_reference = cyber_herd_item.get("tracked_event_reference") if cyber_herd_item else None
+        if not tracked_reference:
+            tracked_reference = format_nostr_event_reference(event_id)
+        nostr_attacker_name = tracked_reference or attacker_nprofile or attacker_name
+
+        # Create Nostr message with event reference fallback
+        nostr_message_content = template.format(
+            attacker_name=nostr_attacker_name,
             attacker_amount=attacker_amount,
             victim_name=victim_nprofile if victim_nprofile else victim_name,
             victim_amount=victim_amount,
             required_amount=required_amount
         )
+        
+        # Strip promotional URL for NIP-53 chat messages
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            nostr_message_content = nostr_message_content.replace("\n\n https://lightning-goats.com\n\n", "")
         
         # Create client message with display names
         client_message = template.format(
@@ -421,16 +647,18 @@ async def make_messages(
             required_amount=required_amount
         )
         
-        # Use nostr_message for the command
-        message = nostr_message
-        
         # Create Nostr command for headbutt failure - reply to the cyberherd note that was zapped
         command = (
-            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-            f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+            f'{NAK_PATH} event --sec {nos_sec} --kind {1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1} -c "{nostr_message_content}" '
+            f'-t e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
             f'-p {attacker_pubkey} -p {victim_pubkey} '
-            f'{RELAY_URLS}'
         )
+        
+        # Add 30311 event reference tags if provided (NIP-53 compliant)
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            command += f' -t a={reply_to_30311_a_tag} -t e={reply_to_30311_event}'
+        
+        command += f' {RELAY_URLS}'
         
         # Override message for client formatting
         message = client_message
@@ -449,11 +677,12 @@ async def make_messages(
             name=nprofile if nprofile else display_name,
             new_amount=amount
         )
+        nostr_message_content = message
         
         # Create simple command for treats - no specific event to reply to
         command = (
-            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-            f'--tag t=CyberHerd --tag t=Treats '
+            f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message_content}" '
+            f'-t t=CyberHerd -t t=Treats '
             f'{RELAY_URLS}'
         )
 
@@ -471,18 +700,27 @@ async def make_messages(
             nprofile = f"nostr:{nprofile}"
             
         # Format the message for nostr
-        message = template.format(
+        nostr_message_content = template.format(
             member_name=nprofile if nprofile else display_name,
             increase_amount=new_zap_amount,
             new_total=amount
         )
         
+        # Strip promotional URL for NIP-53 chat messages
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            nostr_message_content = nostr_message_content.replace("\n\n https://lightning-goats.com\n\n", "")
+        
         command = (
-            f'{NAK_PATH} event --sec {nos_sec} -c "{message}" '
-            f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
+            f'{NAK_PATH} event --sec {nos_sec} --kind {1311 if (reply_to_30311_event and reply_to_30311_a_tag) else 1} -c "{nostr_message_content}" '
+            f'-t e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
             f'-p {pub_key} '
-            f'{RELAY_URLS}'
         )
+        
+        # Add 30311 event reference tags if provided (NIP-53 compliant)
+        if reply_to_30311_event and reply_to_30311_a_tag:
+            command += f' -t a={reply_to_30311_a_tag} -t e={reply_to_30311_event}'
+        
+        command += f' {RELAY_URLS}'
         
         # Also format message for client display with display name
         message = template.format(
@@ -491,37 +729,12 @@ async def make_messages(
             new_total=amount
         )
 
-    elif event_type == "new_member":
-        name = cyber_herd_item.get('display_name', 'Anon')
-        amount = cyber_herd_item.get('amount', 0)
-        nprofile = cyber_herd_item.get('nprofile', '')
-        
-        # Ensure nprofile is well-formed
-        if nprofile and not nprofile.startswith("nostr:"):
-            nprofile = f"nostr:{nprofile}"
-        
-        thanks_part = random.choice(thank_you_variations).format(new_amount=amount)
-        
-        # Use nprofile for the nostr message, display_name for client message
-        nostr_message = template.format(name=nprofile, thanks_part=thanks_part, difference=difference, new_amount=amount, event_id=cyber_herd_item.get('event_id', ''))
-        message = template.format(name=name, thanks_part=thanks_part, difference=difference, new_amount=amount, event_id=cyber_herd_item.get('event_id', ''))
-        
-        # For new members, the command should reference their own pubkey and event_id
-        pubkey = cyber_herd_item.get('pubkey')
-        event_id = cyber_herd_item.get('event_id')
-        
-        if pubkey and event_id:
-            command = (
-                f'{NAK_PATH} event --sec {nos_sec} -c "{nostr_message}" '
-                f'--tag e="{event_id};wss://lnb.bolverker.com/nostrrelay/666;root" '
-                f'-p {pubkey} '
-                f'{RELAY_URLS}'
-            )
-        else:
-            logger.warning("Missing pubkey or event_id for new_member notification")
-
     elif event_type == "daily_reset":
         # Simple message for daily reset, no special formatting needed
+        message = template
+        
+    elif event_type == "herd_reset":
+        # Simple message for herd reset, no special formatting needed
         message = template
         
     elif event_type in ["feeding_regular", "feeding_bonus", "feeding_remainder", "feeding_fallback"]:
@@ -560,6 +773,11 @@ async def make_messages(
 
     # Helper to run the command
     async def execute_command(command):
+        if TEST_COMMANDS:
+            logger.info(f"🧪 TEST MODE: Would execute command: {command}")
+            # Return a mock successful response for testing
+            return '{"id": "test-event-id-12345"}'
+        
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -574,6 +792,7 @@ async def make_messages(
 
     command_output = None
     if command:
+        logger.info(f"Executing Nostr command: {command}")
         raw_output = await execute_command(command)
         command_output = extract_id_from_stdout(raw_output) if raw_output else None
 
@@ -668,7 +887,7 @@ def format_weather_message(data):
             parts.append(f"💧 {data['humidity']}% humidity")
         
         if data.get('wind_speed') is not None:
-            wind_part = f"💨 {data['wind_speed']} mph"
+            wind_part = f"wind 💨 {data['wind_speed']} mph"
             if data.get('wind_direction'):
                 wind_part += f" {data['wind_direction']}"
             parts.append(wind_part)
@@ -742,7 +961,7 @@ async def send_cyberherd_update(newest_pubkey: str = None, database=None):
         
     try:
         # Get all current CyberHerd members
-        query = "SELECT * FROM cyber_herd ORDER BY amount DESC, payouts DESC"
+        query = "SELECT * FROM cyber_herd WHERE is_active = 1 ORDER BY amount DESC, payouts DESC"
         herd_members = await database.fetch_all(query)
         
         if not herd_members:
