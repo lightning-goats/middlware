@@ -199,3 +199,27 @@ def format_nostr_event_reference(event_id: Optional[str]) -> Optional[str]:
     if not encoded:
         return None
     return f"nostr:{encoded}"
+
+
+def format_nostr_pubkey(pubkey_hex: Optional[str]) -> Optional[str]:
+    """
+    Convert a 32-byte hex pubkey into a nostr:npub Bech32 reference.
+    Returns None if the pubkey cannot be encoded.
+    """
+    if not pubkey_hex or not isinstance(pubkey_hex, str):
+        return None
+    candidate = pubkey_hex.strip().lower()
+    if len(candidate) != 64:
+        return None
+    try:
+        raw = bytes.fromhex(candidate)
+    except ValueError:
+        logger.debug("format_nostr_pubkey: invalid hex pubkey '%s'", candidate)
+        return None
+    data = _convert_bits(raw, 8, 5)
+    if not data:
+        return None
+    encoded = _bech32_encode("npub", data)
+    if not encoded:
+        return None
+    return f"nostr:{encoded}"
