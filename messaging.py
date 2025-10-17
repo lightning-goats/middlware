@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Optional, List, Dict
 from dotenv import load_dotenv
-from utils.helpers import DEFAULT_RELAYS, format_nostr_event_reference
+from utils.helpers import DEFAULT_RELAYS, format_nostr_event_reference, format_nostr_pubkey
 
 # Load environment variables
 load_dotenv()
@@ -165,12 +165,11 @@ async def make_messages(
         if nprofile and not nprofile.startswith("nostr:"):
             nprofile = f"nostr:{nprofile}"
 
-        tracked_reference = None
-        if cyber_herd_item:
-            tracked_reference = cyber_herd_item.get("tracked_event_reference")
-        if not tracked_reference:
-            tracked_reference = format_nostr_event_reference(event_id)
-        nostr_name = tracked_reference or nprofile or display_name
+        # For nostr messages prefer an npub derived from the member pubkey.
+        # Fallbacks (in order): npub from pubkey, nprofile (already normalized above),
+        # a note reference for the event, then the display name.
+        nostr_pub = format_nostr_pubkey(pub_key) if pub_key else None
+        nostr_name = nostr_pub or nprofile or format_nostr_event_reference(event_id) or display_name
 
         # Spots info
         spots_info = ""
@@ -452,11 +451,14 @@ async def make_messages(
         # Ensure nprofile is well-formed
         if victim_nprofile and not victim_nprofile.startswith("nostr:"):
             victim_nprofile = f"nostr:{victim_nprofile}"
-        
-        # Create Nostr message with nprofile
+        # Prefer victim npub (from pubkey) for nostr messages, fall back to nprofile then display name
+        victim_npub = format_nostr_pubkey(victim_pubkey) if victim_pubkey else None
+        nostr_victim_name = victim_npub or (victim_nprofile if victim_nprofile else victim_name)
+
+        # Create Nostr message with normalized victim identifier
         nostr_message_content = template.format(
             required_sats=required_sats,
-            victim_name=victim_nprofile if victim_nprofile else victim_name
+            victim_name=nostr_victim_name
         )
         
         # Strip promotional URL for NIP-53 chat messages
@@ -508,12 +510,22 @@ async def make_messages(
         if nprofile and not nprofile.startswith("nostr:"):
             nprofile = f"nostr:{nprofile}"
             
+        # Client message should show the human display name
         message = template.format(
             new_amount=amount,
-            name=display_name if not nprofile else nprofile,
+            name=display_name,
             difference=difference
         )
-        nostr_message_content = message
+
+        # For nostr content prefer npub from pubkey, then nprofile, then display name
+        pub_key = cyber_herd_item.get("pubkey") if cyber_herd_item else None
+        nostr_name = format_nostr_pubkey(pub_key) if pub_key else None
+        nostr_name = nostr_name or (nprofile if nprofile else display_name)
+        nostr_message_content = template.format(
+            new_amount=amount,
+            name=nostr_name,
+            difference=difference
+        )
         
         # Command for posting to nostr
         if cyber_herd_item and cyber_herd_item.get("pubkey"):
@@ -560,16 +572,21 @@ async def make_messages(
             next_headbutt_message = random.choice(list(headbutt_info_dict.values()))
             next_headbutt_text = f" {next_headbutt_message.format(required_sats=required_sats, victim_name=next_victim_name)}"
         
-        tracked_reference = cyber_herd_item.get("tracked_event_reference") if cyber_herd_item else None
-        if not tracked_reference:
-            tracked_reference = format_nostr_event_reference(event_id)
-        nostr_attacker_name = tracked_reference or attacker_nprofile or attacker_name
+        # Prefer attacker npub (derived from pubkey) for nostr messages; fall back to nprofile,
+        # then event reference, then display name.
+        nostr_attacker_pub = format_nostr_pubkey(attacker_pubkey) if attacker_pubkey else None
+        if attacker_nprofile and not attacker_nprofile.startswith("nostr:"):
+            attacker_nprofile = f"nostr:{attacker_nprofile}"
+        nostr_attacker_name = nostr_attacker_pub or attacker_nprofile or format_nostr_event_reference(event_id) or attacker_name
 
-        # Create Nostr message with event reference fallback
+        # Prefer victim npub for nostr messages as well
+        victim_npub = format_nostr_pubkey(victim_pubkey) if victim_pubkey else None
+        nostr_victim_name = victim_npub or (victim_nprofile if victim_nprofile else victim_name)
+
         nostr_message_content = template.format(
             attacker_name=nostr_attacker_name,
             attacker_amount=attacker_amount,
-            victim_name=victim_nprofile if victim_nprofile else victim_name,
+            victim_name=nostr_victim_name,
             victim_amount=victim_amount
         ) + next_headbutt_text
         
@@ -620,16 +637,21 @@ async def make_messages(
         if victim_nprofile and not victim_nprofile.startswith("nostr:"):
             victim_nprofile = f"nostr:{victim_nprofile}"
         
-        tracked_reference = cyber_herd_item.get("tracked_event_reference") if cyber_herd_item else None
-        if not tracked_reference:
-            tracked_reference = format_nostr_event_reference(event_id)
-        nostr_attacker_name = tracked_reference or attacker_nprofile or attacker_name
+        # Prefer attacker npub (derived from pubkey) for nostr messages; fall back to nprofile,
+        # then event reference, then display name.
+        nostr_attacker_pub = format_nostr_pubkey(attacker_pubkey) if attacker_pubkey else None
+        if attacker_nprofile and not attacker_nprofile.startswith("nostr:"):
+            attacker_nprofile = f"nostr:{attacker_nprofile}"
+        nostr_attacker_name = nostr_attacker_pub or attacker_nprofile or format_nostr_event_reference(event_id) or attacker_name
 
-        # Create Nostr message with event reference fallback
+        # Prefer victim npub for nostr messages as well
+        victim_npub = format_nostr_pubkey(victim_pubkey) if victim_pubkey else None
+        nostr_victim_name = victim_npub or (victim_nprofile if victim_nprofile else victim_name)
+
         nostr_message_content = template.format(
             attacker_name=nostr_attacker_name,
             attacker_amount=attacker_amount,
-            victim_name=victim_nprofile if victim_nprofile else victim_name,
+            victim_name=nostr_victim_name,
             victim_amount=victim_amount,
             required_amount=required_amount
         )
@@ -673,11 +695,19 @@ async def make_messages(
         if nprofile and not nprofile.startswith("nostr:"):
             nprofile = f"nostr:{nprofile}"
             
+        # Client message uses display name
         message = template.format(
-            name=nprofile if nprofile else display_name,
+            name=display_name,
             new_amount=amount
         )
-        nostr_message_content = message
+        # For nostr prefer npub from pubkey, then nprofile, then display name
+        pub_key = cyber_herd_item.get("pubkey") if cyber_herd_item else None
+        nostr_name = format_nostr_pubkey(pub_key) if pub_key else None
+        nostr_name = nostr_name or (nprofile if nprofile else display_name)
+        nostr_message_content = template.format(
+            name=nostr_name,
+            new_amount=amount
+        )
         
         # Create simple command for treats - no specific event to reply to
         command = (
@@ -699,9 +729,11 @@ async def make_messages(
         if nprofile and not nprofile.startswith("nostr:"):
             nprofile = f"nostr:{nprofile}"
             
-        # Format the message for nostr
+        # Format the message for nostr: prefer npub derived from pub_key, then nprofile, then display_name
+        nostr_member_pub = format_nostr_pubkey(pub_key) if pub_key else None
+        nostr_member_name = nostr_member_pub or (nprofile if nprofile else display_name)
         nostr_message_content = template.format(
-            member_name=nprofile if nprofile else display_name,
+            member_name=nostr_member_name,
             increase_amount=new_zap_amount,
             new_total=amount
         )
