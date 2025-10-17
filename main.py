@@ -54,6 +54,28 @@ def _ttl_until_next_midnight() -> int:
     next_midnight = datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
     return max(60, int((next_midnight - now).total_seconds()))
 
+
+def get_a_tag_value(tags: list, prefix: str = None) -> Optional[str]:
+    """Return the value of the first 'a' tag found in tags.
+
+    If prefix is provided, return the portion after 'prefix:' when a tag value starts
+    with that prefix. Otherwise return the raw 'a' tag string.
+    """
+    if not tags:
+        return None
+    for tag in tags:
+        if isinstance(tag, list) and len(tag) >= 2 and tag[0] == 'a':
+            a_val = tag[1]
+            if not isinstance(a_val, str):
+                continue
+            if prefix:
+                if a_val.startswith(f"{prefix}:"):
+                    return a_val[len(prefix) + 1:]
+                else:
+                    continue
+            return a_val
+    return None
+
 # Global HTTP client
 http_client: httpx.AsyncClient = None
 
@@ -349,13 +371,56 @@ async def recover_missed_zaps_on_startup():
         
         logger.info(f"📊 Processed {lines_processed} lines from nak output")
         
-        if not cyberherd_note_ids:
-            logger.info("ℹ️ No CyberHerd notes found for today - no zaps to recover")
-            return
-        
         logger.info(f"📝 Found {len(cyberherd_note_ids)} CyberHerd notes from today")
 
-        # Populate daily cache to avoid future relay queries for tag checks
+        # Step 1.5: One-time search for today's kind 30311 events (non-streaming)
+        logger.info("🔎 One-time search for today's kind 30311 events (non-streaming)...")
+        kind_30311_event_ids = []
+        kind_30311_command = (
+            f"/usr/local/bin/nak req -k 30311 -a {our_hex_key} "
+            f"--since {midnight_timestamp} --limit 10 {relays_str}"
+        )
+        logger.debug(f"Executing command: {kind_30311_command}")
+        try:
+            proc_30311 = await asyncio.create_subprocess_shell(
+                kind_30311_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout_30311, stderr_30311 = await asyncio.wait_for(proc_30311.communicate(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ Kind 30311 events search timed out after 10 seconds - skipping 30311 recovery")
+            try:
+                proc_30311.kill()
+                await proc_30311.wait()
+            except:
+                pass
+        except Exception as e:
+            logger.error(f"❌ Failed to execute kind 30311 events search: {e}")
+
+        # Parse 30311 events and keep only those tagged for CyberHerd
+        if 'proc_30311' in locals() and proc_30311.returncode == 0:
+            raw_30311_output = stdout_30311.decode().strip()
+            for line in raw_30311_output.split('\n'):
+                if not line.strip():
+                    continue
+                try:
+                    ed = json.loads(line)
+                    ev_id = ed.get('id')
+                    if ev_id:
+                        # Only include 30311 events that are explicitly tagged as CyberHerd
+                        try:
+                            tagged = await check_cyberherd_tag(ev_id, RELAYS)
+                        except Exception as e:
+                            logger.debug(f"Failed to check CyberHerd tag for 30311 event {ev_id}: {e}")
+                            tagged = False
+                        if tagged:
+                            kind_30311_event_ids.append(ev_id)
+                            logger.debug(f"Found CyberHerd-tagged kind 30311 event: {ev_id}")
+                except json.JSONDecodeError:
+                    continue
+
+        # Populate daily cache for CyberHerd notes (helps tag checks later)
         try:
             key = _today_key()
             ttl = _ttl_until_next_midnight()
@@ -363,13 +428,21 @@ async def recover_missed_zaps_on_startup():
             logger.info(f"✅ Cached {len(cyberherd_note_ids)} CyberHerd-tagged note IDs for today")
         except Exception as e:
             logger.warning(f"Could not cache CyberHerd note IDs: {e}")
-        
-        # Step 2: Search for zaps to each CyberHerd note (non-blocking)
+
+        # Combine all event ids (CyberHerd notes + 30311 events) for zap searches
+        all_event_ids = cyberherd_note_ids + kind_30311_event_ids
+        if not all_event_ids:
+            logger.info("ℹ️ No CyberHerd notes or 30311 events found for today - no zaps to recover")
+            return
+
+        logger.info(f"🔁 Found {len(all_event_ids)} total events ({len(cyberherd_note_ids)} CyberHerd notes, {len(kind_30311_event_ids)} 30311 events)")
+
+        # Step 2: Search for zaps to each event (non-blocking)
         recovered_count = 0
         processed_count = 0
-        max_notes_to_process = 10  # Limit notes to prevent long startup times
-        
-        for i, note_id in enumerate(cyberherd_note_ids[:max_notes_to_process]):
+        max_notes_to_process = 20  # increased since we may have both types
+
+        for i, note_id in enumerate(all_event_ids[:max_notes_to_process]):
             if i >= max_notes_to_process:
                 logger.info(f"⚠️ Reached maximum note processing limit ({max_notes_to_process}) - remaining notes will be processed on next startup")
                 break
@@ -596,11 +669,20 @@ async def process_missed_zap_event(zap_data: dict):
             member_record = await database.fetch_one(check_query, values={"pubkey": zapper_pubkey})
             is_existing_member = member_record is not None
             
-            # Process if: 1) CyberHerd note (for new or existing members) OR 2) Existing member zapping any note
-            should_process_as_cyberherd = is_cyberherd_zap or is_existing_member
+            # Check if this is a zap to a kind 30311 event via 'a' tag
+            a_tag_30311 = get_a_tag_value(zap_request_tags, prefix='30311')
+            is_30311_zap = False
+            if a_tag_30311:
+                try:
+                    is_30311_zap = await check_cyberherd_tag(a_tag_30311, RELAYS)
+                except Exception as e:
+                    logger.debug(f"Failed to check CyberHerd tag for a-tag 30311 reference {a_tag_30311}: {e}")
+
+            # Process if: 1) CyberHerd note (for new or existing members) OR 2) Existing member zapping any note OR 3) 30311 zap
+            should_process_as_cyberherd = is_cyberherd_zap or is_existing_member or is_30311_zap
             
-            zap_type = "CyberHerd note" if is_cyberherd_zap else "member increase (any note)" if is_existing_member else "Regular"
-            member_status = "existing member" if is_existing_member else "new member" if is_cyberherd_zap else "non-member"
+            zap_type = "CyberHerd note" if is_cyberherd_zap else "member increase (any note)" if is_existing_member else "kind 30311 event" if is_30311_zap else "Regular"
+            member_status = "existing member" if is_existing_member else "new member" if (is_cyberherd_zap or is_30311_zap) else "non-member"
             
             logger.info(f"💎 Processing valid missed zap: {zap_amount_sats} sats from {zapper_pubkey[:16]}... ({zap_type} from {member_status})")
             
@@ -2492,12 +2574,24 @@ async def handle_cyberherd_logic_background(payment_data: dict, zap_request: dic
         )
         is_active_member = member_record and member_record['is_active'] == 1
         is_cyberherd_note = await check_cyberherd_tag(event_id)
+        # Check for 30311 'a' tag in the zap request
+        a_tag_30311 = get_a_tag_value(zap_request.get('tags', []), prefix='30311')
+        is_30311_zap = False
+        if a_tag_30311:
+            try:
+                is_30311_zap = await check_cyberherd_tag(a_tag_30311, RELAYS)
+            except Exception as e:
+                logger.debug(f"Failed to check CyberHerd tag for a-tag 30311 reference {a_tag_30311}: {e}")
         # -------------------------------------------------
 
-        if is_cyberherd_note or is_active_member:
+        if is_cyberherd_note or is_active_member or is_30311_zap:
             is_cyberherd = True
-            zap_type = "CyberHerd note" if is_cyberherd_note else "active member increase"
-            member_status = "active member" if is_active_member else "new member"
+            if is_30311_zap:
+                zap_type = "kind 30311 event"
+                member_status = "zapper"
+            else:
+                zap_type = "CyberHerd note" if is_cyberherd_note else "active member increase"
+                member_status = "active member" if is_active_member else "new member"
             logger.info(f"Background: CyberHerd zap detected - {zap_type} from {member_status} - processing.")
 
             # This contains the rest of the slow DB/Nostr logic
