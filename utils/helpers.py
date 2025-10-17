@@ -8,9 +8,9 @@ logger = logging.getLogger(__name__)
 # Centralized relay configuration - single source of truth
 DEFAULT_RELAYS = [
     "wss://relay.primal.net/",
-    "wss://nostr-pub.wellorder.net",
     "wss://relay.damus.io/",
-    "wss://nostr.oxtr.dev"
+    "wss://nostr.oxtr.dev",
+    "wss://nostr-pub.wellorder.net"
 ]
 
 def calculate_payout(amount: float) -> float:
@@ -116,3 +116,86 @@ def calculate_member_updates(
 
     logger.debug(f"Final calculated payout increment: {payout_increment}, Updated kinds string: '{updated_kinds_str}'")
     return payout_increment, updated_kinds_str
+
+# --- Nostr helpers -----------------------------------------------------------
+
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def _bech32_polymod(values: List[int]) -> int:
+    """Internal: Compute Bech32 checksum."""
+    generator = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+    chk = 1
+    for value in values:
+        top = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ value
+        for i in range(5):
+            if (top >> i) & 1:
+                chk ^= generator[i]
+    return chk
+
+
+def _bech32_hrp_expand(hrp: str) -> List[int]:
+    """Internal: Expand HRP for checksum computation."""
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def _bech32_create_checksum(hrp: str, data: List[int]) -> List[int]:
+    """Internal: Create checksum."""
+    values = _bech32_hrp_expand(hrp) + data
+    polymod = _bech32_polymod(values + [0, 0, 0, 0, 0, 0]) ^ 1
+    return [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+
+
+def _bech32_encode(hrp: str, data: List[int]) -> Optional[str]:
+    """Encode hrp and data into a Bech32 string."""
+    if not data:
+        return None
+    combined = data + _bech32_create_checksum(hrp, data)
+    return hrp + "1" + "".join(_BECH32_CHARSET[d] for d in combined)
+
+
+def _convert_bits(data: bytes, from_bits: int, to_bits: int, pad: bool = True) -> Optional[List[int]]:
+    """General power-of-two base conversion."""
+    acc = 0
+    bits = 0
+    maxv = (1 << to_bits) - 1
+    result: List[int] = []
+    for value in data:
+        if value < 0 or (value >> from_bits):
+            return None
+        acc = (acc << from_bits) | value
+        bits += from_bits
+        while bits >= to_bits:
+            bits -= to_bits
+            result.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            result.append((acc << (to_bits - bits)) & maxv)
+    elif bits >= from_bits or ((acc << (to_bits - bits)) & maxv):
+        return None
+    return result
+
+
+def format_nostr_event_reference(event_id: Optional[str]) -> Optional[str]:
+    """
+    Convert a 32-byte hex event id into a nostr:note Bech32 reference.
+    Returns None if the event id cannot be encoded.
+    """
+    if not event_id or not isinstance(event_id, str):
+        return None
+    candidate = event_id.strip().lower()
+    if len(candidate) != 64:
+        return None
+    try:
+        raw = bytes.fromhex(candidate)
+    except ValueError:
+        logger.debug("format_nostr_event_reference: invalid hex event id '%s'", candidate)
+        return None
+    data = _convert_bits(raw, 8, 5)
+    if not data:
+        return None
+    encoded = _bech32_encode("note", data)
+    if not encoded:
+        return None
+    return f"nostr:{encoded}"
